@@ -21,6 +21,7 @@
 > *开源协议：MIT（随便玩，但记得保留原作者的名字，顺便给个 Star 好不好嘛~）*
 
 ![status](https://img.shields.io/badge/status-WIP%20%2F%20scaffolding-orange)
+[![CI](https://github.com/7nian173/FatFish-Whisper/actions/workflows/ci.yml/badge.svg)](https://github.com/7nian173/FatFish-Whisper/actions/workflows/ci.yml)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -139,11 +140,12 @@ E_current  = clamp(E_prev + delta, 0, 100)
 - [x] 项目脚手架 / 目录结构
 - [x] 一键安装与启动脚本（`install.bat` / `start.bat`）
 - [x] Core-Engine 双轨判定骨架
+- [x] CI：多版本导入冒烟 + 接口冒烟（`.github/workflows/ci.yml`）
 - [ ] 内心 OS 生成的 Prompt 模板体系（`os_builder`）
 - [ ] 记忆路由：宿主原生记忆 / Mem0 适配
 - [ ] Adapter 多宿主适配（NapCat / Lagrange / NoneBot2）
 - [ ] 管理后台图表化（情绪曲线、好感度趋势）
-- [ ] 单元测试与 CI
+- [ ] 单元测试（pytest）
 
 ## ❓ 常见问题
 

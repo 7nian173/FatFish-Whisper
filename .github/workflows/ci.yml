@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- 依赖 + 导入冒烟
+  import-check:
+    name: import · py${{ matrix.python }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12"]
+        include:
+          # 目标平台是 Windows，单独跑一个组合确认脚本依赖也能装上
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: packages/core-engine/requirements.txt
+
+      - name: 安装依赖
+        run: python -m pip install -r packages/core-engine/requirements.txt
+
+      - name: 导入冒烟（模块级语法 / 循环依赖 / 缺依赖）
+        env:
+          PYTHONPATH: packages/core-engine/src
+        run: |
+          python -c "import engine, memory, main; print('import ok')"
+
+      - name: 编译检查（全量 .py 语法）
+        run: python -m compileall -q packages
+
+  # ---------------------------------------------------------------- 接口冒烟
+  api-smoke:
+    name: api smoke · py3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: packages/core-engine/requirements.txt
+
+      - name: 安装依赖
+        run: python -m pip install -r packages/core-engine/requirements.txt
+
+      - name: 准备 .env（填入假 Key，验证脱敏与 Track B 优雅降级）
+        run: |
+          cp packages/core-engine/.env.example packages/core-engine/.env
+          python - <<'PY'
+          import pathlib
+          p = pathlib.Path("packages/core-engine/.env")
+          text = p.read_text(encoding="utf-8")
+          text = text.replace("LLM_API_KEY=sk-xxxxxx", "LLM_API_KEY=sk-fake0000000000000000000000000000")
+          p.write_text(text, encoding="utf-8")
+          print("fake key injected")
+          PY
+
+      - name: 启动引擎
+        working-directory: packages/core-engine/src
+        run: |
+          nohup python main.py > engine.log 2>&1 &
+          echo $! > engine.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/api/v1/health >/dev/null; then
+              echo "engine up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::引擎 30s 内未就绪"
+          cat engine.log
+          exit 1
+
+      - name: GET /admin 应返回 200
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/admin)
+          echo "status=$code"; test "$code" = "200"
+
+      - name: POST /api/v1/chat 应返回动作数组
+        run: |
+          curl -s -X POST http://127.0.0.1:8000/api/v1/chat \
+            -H "Content-Type: application/json" \
+            -d '{"user_id":"ci-smoke","message":"今天有点累，但还行吧"}' > /tmp/chat.json
+          cat /tmp/chat.json
+          echo
+          python - <<'PY'
+          import json
+          data = json.load(open("/tmp/chat.json", encoding="utf-8"))
+          assert "actions" in data, "缺少 actions 字段"
+          assert "inner_os" in data, "缺少 inner_os 字段"
+          assert "debug" in data, "缺少 debug 字段"
+          print("chat ok · path=" + str(data["debug"].get("path")))
+          PY
+
+      - name: GET /api/v1/config 必须脱敏
+        run: |
+          curl -s http://127.0.0.1:8000/api/v1/config > /tmp/config.json
+          cat /tmp/config.json
+          echo
+          python - <<'PY'
+          import json
+          data = json.load(open("/tmp/config.json", encoding="utf-8"))
+          blob = json.dumps(data, ensure_ascii=False)
+          assert "sk-fake0000000000000000000000000000" not in blob, "配置接口泄露了明文 Key"
+          assert "****" in blob, "Key 未被脱敏"
+          print("mask ok")
+          PY
+
+      - name: 上传失败日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: |
+            packages/core-engine/src/engine.log
+            packages/core-engine/*.db
+          if-no-files-found: ignore
