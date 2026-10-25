@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FatFish-Whisper 控制台</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<style>
+  body {
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #0e2a3a 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, #10223b 0%, transparent 55%),
+      #060d14;
+  }
+  .card {
+    background: rgba(13, 26, 38, 0.72);
+    border: 1px solid rgba(94, 234, 212, 0.12);
+    backdrop-filter: blur(6px);
+  }
+  .glow { box-shadow: 0 0 24px rgba(45, 212, 191, 0.10) inset; }
+  .bar { transition: width .4s ease; }
+  input, textarea {
+    background: rgba(4, 12, 20, 0.85);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+  }
+  input:focus, textarea:focus { outline: none; border-color: #2dd4bf; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #1e3a4a; border-radius: 8px; }
+</style>
+</head>
+<body class="min-h-screen text-slate-200 antialiased">
+<div id="app" class="max-w-6xl mx-auto px-5 py-7 space-y-6">
+
+  <!-- 顶部 -->
+  <header class="flex flex-wrap items-end justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">
+        <span class="text-teal-300">🐳 FatFish-Whisper</span>
+        <span class="text-slate-400 text-base font-normal">潜鱼潜语 · 情绪机控制台</span>
+      </h1>
+      <p class="text-sm text-slate-500 mt-1">双轨判定 · 内心 OS · 状态落库（SQLite）</p>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+      <span class="flex items-center gap-2">
+        <span class="w-2.5 h-2.5 rounded-full"
+              :class="health === 'ok' ? 'bg-teal-400' : (health === 'unknown' ? 'bg-slate-500' : 'bg-rose-500')"></span>
+        <span class="text-slate-400">{{ health === 'ok' ? '引擎在线' : (health === 'unknown' ? '检测中' : '引擎异常') }}</span>
+      </span>
+      <label class="flex items-center gap-1.5 text-slate-400 select-none">
+        <input type="checkbox" v-model="auto" class="align-middle accent-teal-400">
+        自动刷新
+      </label>
+    </div>
+  </header>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+    <!-- 状态看板 -->
+    <section class="card glow rounded-2xl p-5 lg:col-span-2">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-medium text-slate-100">📊 状态看板</h2>
+        <div class="flex items-center gap-2">
+          <input v-model="filter" placeholder="按 user_id 过滤" class="text-xs rounded-lg px-3 py-1.5 w-40 text-slate-200">
+          <button @click="refresh" class="text-xs rounded-lg px-3 py-1.5 bg-teal-500/15 text-teal-300 hover:bg-teal-500/25">
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <div v-if="stateLoading" class="text-sm text-slate-500 py-8 text-center">读取中…</div>
+      <div v-else-if="filteredUsers.length === 0" class="text-sm text-slate-500 py-8 text-center">
+        还没有任何用户状态。去下面「测试对话」发一句，就会生成一条。
+      </div>
+
+      <div v-else class="space-y-2 max-h-[22rem] overflow-y-auto pr-1">
+        <div v-for="u in filteredUsers" :key="u.user_id"
+             class="rounded-xl border border-slate-700/40 bg-slate-900/30 px-3.5 py-2.5">
+          <div class="flex items-center justify-between text-sm">
+            <span class="font-mono text-slate-300 truncate mr-3">{{ u.user_id }}</span>
+            <span class="shrink-0 text-[11px] px-2 py-0.5 rounded-full"
+                  :class="levelClass(u.level)">{{ u.level }}</span>
+          </div>
+          <div class="mt-2 flex items-center gap-2">
+            <span class="text-[11px] text-slate-500 w-8">情绪</span>
+            <div class="h-1.5 flex-1 rounded-full bg-slate-700/50 overflow-hidden">
+              <div class="bar h-full rounded-full" :class="barClass(u.emotion)" :style="{ width: u.emotion + '%' }"></div>
+            </div>
+            <span class="text-[11px] tabular-nums text-slate-400 w-8 text-right">{{ u.emotion }}</span>
+          </div>
+          <div class="mt-1 flex items-center gap-2">
+            <span class="text-[11px] text-slate-500 w-8">好感</span>
+            <div class="h-1.5 flex-1 rounded-full bg-slate-700/50 overflow-hidden">
+              <div class="bar h-full rounded-full bg-fuchsia-400/70"
+                   :style="{ width: Math.min(100, u.affinity / 2) + '%' }"></div>
+            </div>
+            <span class="text-[11px] tabular-nums text-slate-400 w-8 text-right">{{ u.affinity }}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 参数配置 -->
+    <section class="card glow rounded-2xl p-5">
+      <h2 class="font-medium text-slate-100 mb-4">⚙️ 参数配置</h2>
+
+      <label class="block text-xs text-slate-500 mb-1">API Base</label>
+      <input v-model="cfg.api_base" class="w-full text-sm rounded-lg px-3 py-2 mb-3" placeholder="https://api.deepseek.com/v1">
+
+      <label class="block text-xs text-slate-500 mb-1">API Key</label>
+      <input v-model="cfg.api_key" type="password" class="w-full text-sm rounded-lg px-3 py-2 mb-3" placeholder="sk-...">
+
+      <label class="block text-xs text-slate-500 mb-1">模型名称</label>
+      <input v-model="cfg.model" class="w-full text-sm rounded-lg px-3 py-2 mb-3" placeholder="deepseek-chat">
+
+      <button @click="saveConfig" :disabled="saving"
+              class="w-full text-sm rounded-lg px-3 py-2 bg-teal-500/20 text-teal-200 hover:bg-teal-500/30 disabled:opacity-50">
+        {{ saving ? '保存中…' : '保存到 .env' }}
+      </button>
+
+      <p v-if="cfgMsg" class="mt-3 text-xs" :class="cfgOk ? 'text-teal-300' : 'text-rose-400'">{{ cfgMsg }}</p>
+      <p class="mt-3 text-[11px] leading-relaxed text-slate-500">
+        保存后写入 <span class="font-mono text-slate-400">packages/core-engine/.env</span>，并热更新 Track B。
+        Key 只回显脱敏值；留空的字段不会被覆盖。
+      </p>
+    </section>
+  </div>
+
+  <!-- 测试对话 -->
+  <section class="card glow rounded-2xl p-5">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="font-medium text-slate-100">🧪 测试对话</h2>
+      <input v-model="userId" class="text-xs rounded-lg px-3 py-1.5 w-44 text-slate-200 font-mono" placeholder="user_id">
+    </div>
+
+    <div class="flex flex-col sm:flex-row gap-2">
+      <textarea v-model="chatInput" rows="2" @keydown.enter.exact.prevent="send"
+                class="flex-1 text-sm rounded-lg px-3 py-2 resize-none"
+                placeholder="在这里输入一句话，回车发送（Shift+Enter 换行）"></textarea>
+      <button @click="send" :disabled="sending || !chatInput.trim()"
+              class="sm:w-24 text-sm rounded-lg px-3 py-2 bg-teal-400/90 text-slate-900 font-medium hover:bg-teal-300 disabled:opacity-40">
+        {{ sending ? '…' : '发送' }}
+      </button>
+    </div>
+
+    <div v-if="chatLog.length" class="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="rounded-xl border border-slate-700/40 bg-slate-900/30 p-4">
+        <div class="text-xs text-slate-500 mb-2">内心 OS</div>
+        <div class="text-sm text-teal-100/90 leading-relaxed">{{ last && last.inner_os }}</div>
+
+        <div class="text-xs text-slate-500 mt-4 mb-2">最终动作数组</div>
+        <pre class="text-[12px] leading-relaxed text-slate-300 overflow-x-auto">{{ actionsJson }}</pre>
+
+        <div v-if="last && last.recall_hint" class="mt-4 text-xs text-fuchsia-300">
+          撤回掷骰：{{ last.recall_hint.probability }} · {{ last.recall_hint.reason }}
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-slate-700/40 bg-slate-900/30 p-4">
+        <div class="text-xs text-slate-500 mb-2">debug（情绪轨迹）</div>
+        <pre class="text-[12px] leading-relaxed text-slate-300 overflow-x-auto">{{ debugJson }}</pre>
+        <div v-if="last && last.debug" class="mt-3 text-[11px] text-slate-500">
+          {{ last.debug.path === 'deep' ? '走了 Track B（LLM）' : '走了 Track A（本地快判）' }}
+          · 置信度 {{ last.debug.confidence }} · {{ last.debug.reason }}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="text-[11px] text-slate-600 text-center pb-3">
+    FatFish-Whisper · 本地运行，数据只落在 packages/core-engine/app.db
+  </footer>
+</div>
+
+<script>
+const { createApp } = Vue;
+
+createApp({
+  data() {
+    return {
+      health: 'unknown',
+      users: [],
+      stateLoading: false,
+      filter: '',
+      cfg: { api_base: '', api_key: '', model: '' },
+      cfgMsg: '',
+      cfgOk: true,
+      saving: false,
+      userId: '10001',
+      chatInput: '',
+      chatLog: [],
+      sending: false,
+      auto: true,
+      timer: null,
+    };
+  },
+  computed: {
+    filteredUsers() {
+      const key = this.filter.trim().toLowerCase();
+      if (!key) return this.users;
+      return this.users.filter(u => u.user_id.toLowerCase().indexOf(key) >= 0);
+    },
+    last() {
+      return this.chatLog.length ? this.chatLog[this.chatLog.length - 1] : null;
+    },
+    actionsJson() {
+      return this.last ? JSON.stringify(this.last.actions, null, 2) : '';
+    },
+    debugJson() {
+      return this.last ? JSON.stringify(this.last.debug, null, 2) : '';
+    },
+  },
+  methods: {
+    levelClass(level) {
+      const map = {
+        L0: 'bg-teal-500/15 text-teal-300',
+        L1: 'bg-sky-500/15 text-sky-300',
+        L2: 'bg-amber-500/15 text-amber-300',
+        CRISIS: 'bg-rose-500/15 text-rose-300',
+      };
+      return map[level] || 'bg-slate-600/20 text-slate-300';
+    },
+    barClass(emotion) {
+      if (emotion <= 20) return 'bg-rose-500';
+      if (emotion <= 40) return 'bg-amber-400';
+      if (emotion <= 65) return 'bg-sky-400';
+      return 'bg-teal-400';
+    },
+    async refresh() {
+      this.stateLoading = true;
+      try {
+        const data = await this.get('/api/v1/state');
+        this.users = data.users || [];
+        this.health = 'ok';
+      } catch (err) {
+        this.health = 'down';
+      } finally {
+        this.stateLoading = false;
+      }
+    },
+    async loadConfig() {
+      try {
+        const data = await this.get('/api/v1/config');
+        this.cfg.api_base = data.api_base || '';
+        this.cfg.api_key = '';
+        this.cfg.model = data.model || '';
+      } catch (err) {
+        this.cfgMsg = '读取配置失败：' + err.message;
+        this.cfgOk = false;
+      }
+    },
+    async saveConfig() {
+      this.saving = true;
+      this.cfgMsg = '';
+      try {
+        const payload = {
+          api_base: this.cfg.api_base,
+          model: this.cfg.model,
+        };
+        if (this.cfg.api_key.trim()) payload.api_key = this.cfg.api_key.trim();
+        const data = await this.post('/api/v1/config', payload);
+        this.cfgMsg = data.message || '已保存';
+        this.cfgOk = data.ok !== false;
+        this.cfg.api_key = '';
+      } catch (err) {
+        this.cfgMsg = '保存失败：' + err.message;
+        this.cfgOk = false;
+      } finally {
+        this.saving = false;
+      }
+    },
+    async send() {
+      const text = this.chatInput.trim();
+      if (!text || this.sending) return;
+      this.sending = true;
+      try {
+        const data = await this.post('/api/v1/chat', { user_id: this.userId.trim() || '10001', message: text });
+        this.chatLog.push(data);
+        if (this.chatLog.length > 20) this.chatLog.shift();
+        this.chatInput = '';
+        await this.refresh();
+      } catch (err) {
+        this.chatLog.push({
+          inner_os: '[请求失败] ' + err.message,
+          actions: [],
+          debug: { error: String(err) },
+        });
+      } finally {
+        this.sending = false;
+      }
+    },
+    async get(url) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.json();
+    },
+    async post(url, body) {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : ('HTTP ' + resp.status));
+      return data;
+    },
+  },
+  mounted() {
+    this.refresh();
+    this.loadConfig();
+    this.timer = setInterval(() => {
+      if (this.auto) this.refresh();
+    }, 5000);
+  },
+  beforeUnmount() {
+    if (this.timer) clearInterval(this.timer);
+  },
+}).mount('#app');
+</script>
+</body>
+</html>

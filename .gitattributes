@@ -1,0 +1,11 @@
+* text=auto
+
+# Windows 脚本必须 CRLF，否则 cmd 解析会出问题
+*.bat text eol=crlf
+
+# 源码统一 LF
+*.py   text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf

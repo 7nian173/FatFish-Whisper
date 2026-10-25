@@ -1,0 +1,21 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# ---- 运行期生成物 ----
+packages/core-engine/app.db
+packages/core-engine/.cache/
+*.log
+
+# ---- 本地配置（含密钥，绝不入库）----
+.env
+packages/core-engine/.env
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

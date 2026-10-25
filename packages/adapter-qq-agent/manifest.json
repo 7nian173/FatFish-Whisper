@@ -1,0 +1,40 @@
+{
+  "name": "fatfish-whisper-adapter",
+  "display_name": "潜鱼潜语 · 情绪挂载",
+  "version": "0.1.0",
+  "description": "把宿主 Bot 的消息转发给 FatFish-Whisper 情绪机，执行返回的动作数组，并处理撤回掷骰与冷却。",
+  "author": "FatFish-Whisper",
+  "license": "MIT",
+  "entry": "main.py",
+  "runtime": "python",
+  "runtime_version": ">=3.10",
+  "dependencies": ["httpx>=0.27"],
+  "host": {
+    "type": "qq-bot",
+    "compatible": ["napcat", "lagrange", "nonebot2", "onebot-v11", "*"],
+    "note": "manifest 字段名需按你实际使用的宿主（NapCat / NoneBot2 / Lagrange）的插件规范改名，逻辑代码可直接复用。"
+  },
+  "config": {
+    "core_api": {
+      "type": "string",
+      "default": "http://127.0.0.1:8000/api/v1/chat",
+      "description": "情绪机地址"
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "default": 3.0,
+      "description": "请求情绪机超时；超时后降级到原生 LLM 回复"
+    },
+    "debounce_seconds": {
+      "type": "number",
+      "default": 1.0,
+      "description": "同一用户连续消息的合并窗口"
+    },
+    "recall_cooldown_seconds": {
+      "type": "number",
+      "default": 180,
+      "description": "同一用户两次撤回之间的最小间隔"
+    }
+  },
+  "permissions": ["send_message", "send_poke", "recall_message"]
+}
