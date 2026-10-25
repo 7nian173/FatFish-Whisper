@@ -5,8 +5,10 @@
 - 双轨判定：Track A 是纯本地的词典/规则快判（毫秒级、零成本）；
              Track B 才调用外部 LLM，且只在"高不确定性 / 语义冲突 / 长文本"时触发。
 - 平滑更新：delta = clamp(0.2 * (target - E_prev), -5, +5)，防止情绪跳变。
+- 等级与语气分离：level 描述"平滑后的稳定状态"，tone 描述"这条消息当下的语气"。
+  危机词会立刻把 level 抬到 CRISIS（警报），但情绪值仍按 +-5 缓慢下滑。
 - 持久化：SQLAlchemy + SQLite（app.db）。单机场景没有 Redis / Docker。
-- 防抖：同一用户窗口内的连续消息用 asyncio 队列合并（可选，adapter 自己做防抖时关掉）。
+- 防抖：同一用户窗口内的连续消息用 asyncio 队列合并（可选）。
 - 缓存：diskcache 缓存 Track B 判定结果，省 token。
 """
 from __future__ import annotations
@@ -18,13 +20,13 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
 import httpx
 from diskcache import Cache
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from models.db_models import Base, TokenLog, UserState
 
@@ -36,27 +38,34 @@ CACHE_DIR = os.path.join(CORE_DIR, ".cache")
 
 POSITIVE_WORDS = (
     "开心", "喜欢", "谢谢", "可爱", "好看", "厉害", "棒", "哈哈", "爱你", "想你",
-    "抱抱", "好耶", "舒服", "放心", "温柔", "陪我",
+    "抱抱", "好耶", "舒服", "放心", "温柔", "陪我", "高兴", "幸福",
 )
 NEGATIVE_WORDS = (
     "难过", "伤心", "累", "烦", "讨厌", "生气", "滚", "无聊", "崩溃", "委屈",
-    "痛苦", "孤独", "失眠", "害怕", "焦虑", "压力", "敷衍", "冷淡", "算了",
+    "痛苦", "孤独", "失眠", "害怕", "焦虑", "压力", "敷衍", "冷淡",
 )
 CONFLICT_WORDS = ("但是", "其实", "不过", "可是", "然而", "只是")
 NEGATION_WORDS = ("不", "没", "别", "无", "非")
 
+# 危机词：命中即刻判定 CRISIS（不等情绪值慢慢滑下去）
+CRISIS_WORDS = (
+    "想死", "自杀", "想消失", "好想消失", "活不下去", "不想活", "活着没意思",
+    "没有意义", "撑不住", "不要我了", "绝望", "崩溃了", "想跳",
+)
+
 LEVEL_ORDER = ("CRISIS", "L2", "L1", "L0")
 
-INNER_OS_TEMPLATES = {
+# 语气模板：按"这条消息的当下分数"选，而不是按平滑后的等级
+TONE_TEMPLATES = {
     "L0": (
         "（今天的他有点乖，我心里咕嘟咕嘟冒泡。）",
-        "（明明没说什么，我却偷偷高兴了一下。）",
         "（被在意了一点点，尾巴尖都在晃。）",
+        "（嘿嘿，他还在，我就高兴。）",
     ),
     "L1": (
-        "（他这话有点扎人，可我还是想再听两句。）",
         "（心里泛起点小波浪，先记下来。）",
         "（有点在意，但我不想显得太在意。）",
+        "（这句我听着，慢慢嚼。）",
     ),
     "L2": (
         "（有点凉。我把话咽回去了，不想让他看出来。）",
@@ -70,17 +79,18 @@ INNER_OS_TEMPLATES = {
     ),
 }
 
-REPLY_TABLE = {
-    "L0": ("呜——本鲸知道了。", "嗯哼，今天也好好在听。", "收到收到，我记下了。"),
-    "L1": ("……嗯。你说的我都听见了。", "有点在意，不过我先不吵你。", "好吧，那就这样。"),
+TONE_REPLIES = {
+    "L0": ("呜——本鲸知道了。", "嗯哼，今天也好好在听。", "嘿嘿，你在，我就高兴。"),
+    "L1": ("……嗯。你说的我都听见了。", "我在听，你慢慢说。", "好吧，那就这样。"),
     "L2": ("嗯，我在。", "……我知道了。", "先让我安静一会儿。"),
     "CRISIS": ("……嗯，我在听。", "别急，慢慢说。", "我在这儿，不催你。"),
 }
 
 SYSTEM_PROMPT = """你是"潜鱼潜语"，一个 Bot 的潜意识情绪判定模块。
 你只输出严格 JSON，不要任何解释文字，字段如下：
-{"score": 0-100 的整数, "reason": "一句话说明依据", "inner_os": "第一人称的内心独白，用中文括号包裹，30 字以内"}
+{"score": 0-100 的整数, "reason": "一句话说明依据", "inner_os": "第一人称的内心独白，用中文括号包裹，30 字以内", "crisis": true/false}
 score 含义：0=极度负面/崩溃边缘，50=平静，100=非常愉悦。
+crisis 仅当出现自伤、自毁、绝望类表达时为 true。
 注意反话、克制、口是心非：例如"我没事"往往意味着 score 偏低。"""
 
 
@@ -90,12 +100,23 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def level_of(score: int) -> str:
-    """情绪分 -> 等级。"""
+    """平滑后的情绪分 -> 稳定等级（50 分即默认平静，对应 L0）。"""
     if score <= 20:
         return "CRISIS"
-    if score <= 40:
+    if score <= 34:
         return "L2"
-    if score <= 65:
+    if score <= 49:
+        return "L1"
+    return "L0"
+
+
+def tone_of(score: int) -> str:
+    """即时分数 -> 这条消息的语气。"""
+    if score <= 25:
+        return "CRISIS"
+    if score <= 42:
+        return "L2"
+    if score <= 57:
         return "L1"
     return "L0"
 
@@ -110,18 +131,20 @@ class Verdict:
     reason: str
     inner_os: Optional[str] = None
     tokens: tuple[int, int] = (0, 0)
+    crisis: bool = False
 
 
 # ---------------------------------------------------------------- Track A
 
 class TrackA:
-    """规则轨：词典命中 + 冲突标记 + 否定翻转 + 强度信号。"""
+    """规则轨：词典命中 + 冲突标记 + 否定翻转 + 强度信号 + 危机词。"""
 
     def evaluate(self, text: str) -> Verdict:
         text = text or ""
         hits_pos = [w for w in POSITIVE_WORDS if w in text]
         hits_neg = [w for w in NEGATIVE_WORDS if w in text]
         conflict = [w for w in CONFLICT_WORDS if w in text]
+        crisis_hits = [w for w in CRISIS_WORDS if w in text]
 
         score = 50.0
         score += 7.0 * len(hits_pos)
@@ -147,15 +170,33 @@ class TrackA:
         if len(text) > 120:
             score -= 3.0
 
+        # 危机词：直接压到低位并打标记，不等平滑
+        if crisis_hits:
+            score = min(score, 15.0)
+
         score = clamp(score, 0, 100)
 
-        signals = len(hits_pos) + len(hits_neg) + len(conflict)
+        signals = len(hits_pos) + len(hits_neg) + len(conflict) + len(crisis_hits)
         confidence = clamp(0.30 + 0.18 * signals, 0.0, 0.95)
+        if crisis_hits:
+            confidence = max(confidence, 0.88)
         if not signals and len(text) < 8:
             confidence = 0.25
 
-        reason = "命中: " + ", ".join(hits_pos + hits_neg + conflict) if signals else "无明显信号"
-        return Verdict(score=int(round(score)), confidence=confidence, track="A", reason=reason)
+        if crisis_hits:
+            reason = "危机词: " + ", ".join(crisis_hits)
+        elif signals:
+            reason = "命中: " + ", ".join(hits_pos + hits_neg + conflict)
+        else:
+            reason = "无明显信号"
+
+        return Verdict(
+            score=int(round(score)),
+            confidence=confidence,
+            track="A",
+            reason=reason,
+            crisis=bool(crisis_hits),
+        )
 
     @staticmethod
     def _negated(text: str, word: str) -> bool:
@@ -225,7 +266,6 @@ class TrackB:
         except (httpx.HTTPError, ValueError, OSError):
             return None
 
-        content = ""
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -248,6 +288,7 @@ class TrackB:
             reason=str(parsed.get("reason", "LLM 判定")),
             inner_os=parsed.get("inner_os") or None,
             tokens=(int(usage.get("prompt_tokens", 0) or 0), int(usage.get("completion_tokens", 0) or 0)),
+            crisis=bool(parsed.get("crisis", False)),
         )
         self.cache.set(cache_key, asdict(verdict), expire=3600)
         return verdict
@@ -430,6 +471,8 @@ class EmotionEngine:
             if (verdict.confidence < threshold or len(message) > 120) and self.track_b.enabled:
                 deep = await self.track_b.evaluate(message, prev, affinity, self.memory.as_text(user_id))
                 if deep is not None:
+                    # 危机信号不因走 LLM 轨而丢失
+                    deep.crisis = deep.crisis or verdict.crisis
                     verdict = deep
                     path = "deep"
                     self._log_tokens(user_id, deep.tokens)
@@ -437,15 +480,25 @@ class EmotionEngine:
             delta = clamp(0.2 * (verdict.score - prev), -5.0, 5.0)
             emotion = int(round(clamp(prev + delta, 0, 100)))
 
-            level = level_of(emotion)
+            # 等级描述平滑状态；危机词立即拉响警报，不等数值慢慢滑
+            level = "CRISIS" if verdict.crisis else level_of(emotion)
             if user_id in self.whitelist and level == "CRISIS":
                 level = "L2"  # 白名单用户不进入危机压制
 
-            affinity_delta = 0.8 if emotion >= 65 else (-0.6 if emotion <= 40 else 0.1)
+            affinity_delta = 0
+            if emotion >= 70:
+                affinity_delta = 2
+            elif emotion >= 60:
+                affinity_delta = 1
+            elif emotion <= 30:
+                affinity_delta = -2
+            elif emotion <= 40:
+                affinity_delta = -1
             new_affinity = int(round(clamp(affinity + affinity_delta, 0, 200)))
 
-            inner_os = verdict.inner_os or self._inner_os(user_id, emotion, new_affinity, level)
-            actions = self._actions(user_id, message, level, new_affinity, inner_os)
+            tone = tone_of(verdict.score)
+            inner_os = verdict.inner_os or self._inner_os(user_id, tone)
+            actions = self._actions(user_id, message, tone, new_affinity)
 
             payload: dict[str, Any] = {
                 "actions": actions,
@@ -456,6 +509,8 @@ class EmotionEngine:
                     "delta": round(delta, 2),
                     "affinity": new_affinity,
                     "level": level,
+                    "tone": tone,
+                    "crisis": verdict.crisis,
                     "path": path,
                     "track": verdict.track,
                     "reason": verdict.reason,
@@ -477,17 +532,16 @@ class EmotionEngine:
         idx = int(hashlib.sha256(seed.encode("utf-8")).hexdigest(), 16) % len(items)
         return items[idx]
 
-    def _inner_os(self, user_id: str, emotion: int, affinity: int, level: str) -> str:
-        seed = user_id + "|" + str(emotion) + "|" + str(int(time.time() // 300))
-        return self._pick(seed, INNER_OS_TEMPLATES.get(level, INNER_OS_TEMPLATES["L0"]))
+    def _inner_os(self, user_id: str, tone: str) -> str:
+        seed = user_id + "|" + tone + "|" + str(int(time.time() // 300))
+        return self._pick(seed, TONE_TEMPLATES.get(tone, TONE_TEMPLATES["L1"]))
 
-    def _actions(self, user_id: str, message: str, level: str, affinity: int,
-                 inner_os: str) -> list[dict[str, Any]]:
-        content = self._pick(user_id + "|" + message, REPLY_TABLE.get(level, REPLY_TABLE["L0"]))
+    def _actions(self, user_id: str, message: str, tone: str, affinity: int) -> list[dict[str, Any]]:
+        content = self._pick(user_id + "|" + message, TONE_REPLIES.get(tone, TONE_REPLIES["L1"]))
         actions: list[dict[str, Any]] = [{"type": "text", "content": content}]
 
         # 高好感 + 非低落时，偶尔撒个娇（拍一拍）
-        if affinity >= 120 and level in ("L0", "L1"):
+        if affinity >= 120 and tone in ("L0", "L1"):
             if int(hashlib.sha256((user_id + message).encode("utf-8")).hexdigest(), 16) % 4 == 0:
                 actions.append({"type": "poke", "target": user_id, "suffix": "戳了戳你的鱼鳍"})
         return actions
