@@ -149,14 +149,8 @@ E_current  = clamp(E_prev + delta, 0, 100)
 
 ## ❓ 常见问题
 
-**Q：启动报 `ModuleNotFoundError`？**
-先跑一遍 `install.bat`，确认 `venv` 已创建成功。
 
-**Q：后台能打开但回复没有情绪？**
-`.env` 里的 `LLM_API_KEY` 还没填，Track B 会静默降级到代码轨。
 
-**Q：`app.db` 需要提交吗？**
-不需要，也**不应该**。它是运行期生成的本地数据，已在 `.gitignore` 中排除。
 
 ---
 
