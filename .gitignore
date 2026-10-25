@@ -1,21 +1,47 @@
-# ---- Python ----
+# ================= Python =================
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
 *.egg-info/
+.eggs/
+build/
+dist/
 venv/
 .venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# ---- 运行期生成物 ----
-packages/core-engine/app.db
+# ================= 运行期生成物 =================
+# SQLite 数据库（含用户情绪数据，首次启动自动生成）
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
 packages/core-engine/.cache/
+cache.db
 *.log
 
-# ---- 本地配置（含密钥，绝不入库）----
+# ================= 本地配置（含密钥，绝不入库）=================
 .env
+.env.local
+.env.*.local
 packages/core-engine/.env
+# 保留示例模板
+!packages/core-engine/.env.example
 
-# ---- 编辑器 / 系统 ----
+# ================= 编辑器 / 系统 =================
 .vscode/
 .idea/
+*.swp
+.DS_Store
 Thumbs.db
 desktop.ini
+
+# ================= 本项目私有 =================
+# 部署参考文档，仅本地留存
+git的仓库结构.txt
+.workbuddy-ai/
