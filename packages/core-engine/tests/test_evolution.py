@@ -28,7 +28,10 @@ from memory_router import LocalSQLiteProvider
 from models import Base, MessageCount
 from monitor import MOD_EVOLVE, MOD_OOC, TokenMonitor
 
-DAY = datetime.date(2026, 10, 25)
+#: 演化基准日 = **当前 UTC 日**（不要硬编码具体日期！）
+#: 历史教训：曾写死 2026-10-25，而 token 记账按 utcnow() 落库——跨过 UTC 零点后
+#: 「查 10-25 但记录在 10-26」→ test_演化与ooc的token分别记账 必挂（日期炸弹）。
+DAY = datetime.datetime.now(datetime.timezone.utc).date()
 OLD_DAY = DAY - datetime.timedelta(days=7)
 
 
