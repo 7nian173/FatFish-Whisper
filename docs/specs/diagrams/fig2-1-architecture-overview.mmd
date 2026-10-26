@@ -1,0 +1,63 @@
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "15px", "fontFamily": "Microsoft YaHei, sans-serif"}}}%%
+flowchart TB
+
+  subgraph HOST["宿主进程（NapCat / Lagrange / NoneBot2）"]
+    LLM["宿主主 LLM<br/>拥有全部采纳权"]
+  end
+
+  subgraph ADAPTER["Adapter 探针层"]
+    A1["消息接收 + IngressDeduper 判重<br/>Debouncer 归属 Core，Adapter 只声明"]
+    A3["core_client.ask<br/>3s 超时 + 降级"]
+    A4["executor 动作执行<br/>+ recall 撤回判定"]
+  end
+
+  subgraph CORE["Core-Engine 情绪机（旁路微服务）"]
+    C1["意图短路<br/>noise / 白名单 / runtime_context"]
+    C2["双轨判定<br/>Track A 词典 → Track B LLM"]
+    C3["状态机<br/>平滑 0.2 → 衰减 → 习惯化"]
+    C4["内心 OS 生成<br/>+ auditor 审计与解禁"]
+    C5["Prompt 拼装<br/>只追加尾部"]
+    C6["记忆路由<br/>三级降级"]
+    C7["演化监控<br/>7 日 OOC 探针"]
+  end
+
+  subgraph STORE_G["存储层 · 全局区（不分房）"]
+    S2["UserAffinity<br/>好感度锚点 0~200"]
+    S3["BotMood<br/>全局单行 id=1"]
+    S5["persona_traits<br/>性格向量"]
+  end
+
+  subgraph STORE_P["存储层 · 分房区（按 chat_scope）"]
+    S1["UserState<br/>主键 (user_id, chat_scope)"]
+    S4["memories<br/>索引含 chat_scope"]
+  end
+
+  A1 --> A3
+  A3 -->|"POST /api/v1/chat<br/>携带 trigger_type + chat_scope"| C1
+  C1 --> C2 --> C3 --> C4 --> C5
+  C5 -->|"final_prompt 尾部<br/>inner_os + actions"| A4
+  A4 -->|"仅建议，不下达指令<br/>死线 1 主权隔离"| LLM
+  C6 --> C5
+  C7 -.->|"缓慢调制"| S5
+
+  C3 --> S1
+  C4 --> S1
+  C3 --> S2
+  C3 --> S3
+  C6 --> S4
+
+  S1 -.->|"只读回填"| C3
+  S4 -.->|"检索注入"| C6
+  S2 -.->|"只读回填"| C3
+
+  classDef global fill:#E8F4FD,stroke:#2C7FB8,stroke-width:1.5px,color:#0B3C5D
+  classDef room fill:#FDF2E8,stroke:#C97B2C,stroke-width:1.5px,color:#5C3410
+  classDef core fill:#F0E8FD,stroke:#7B52C9,stroke-width:1.5px,color:#2E1A5C
+  classDef adapter fill:#E8FDF0,stroke:#2CA05C,stroke-width:1.5px,color:#0B4526
+  classDef host fill:#F5F5F5,stroke:#666,stroke-width:1.5px,color:#222
+
+  class S2,S3,S5 global
+  class S1,S4 room
+  class C1,C2,C3,C4,C5,C6,C7 core
+  class A1,A2,A3,A4 adapter
+  class LLM host

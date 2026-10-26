@@ -1,0 +1,26 @@
+flowchart TD
+    M[消息进入] --> D{IngressDeduper<br/>命中?}
+    D -->|是| DUP[status=duplicate<br/>零动作]
+    D -->|否| P{privileged 且<br/>未命中硬拦截?}
+    P -->|是| WL[白名单短路<br/>不判定/不计分/不写记忆]
+    P -->|否| TA[Track A 词典判定]
+    TA --> R{risk_hits?}
+    R -->|是| CR[target=0<br/>path=crisis<br/>confidence=1.0]
+    R -->|否| CF{semantic_conflict?}
+    CF -->|是| TB1{Track B<br/>enabled?}
+    TB1 -->|是| TB[LLM 仲裁]
+    TB1 -->|否| NT1[target=50 保守]
+    CF -->|否| UD{undefined?<br/>零命中或正负打平}
+    UD -->|是| TB2{Track B<br/>enabled?}
+    TB2 -->|是| TBR[LLM 仲裁 + 关系快照]
+    TB2 -->|否| NT2[target=50]
+    UD -->|否| SC[五档打分<br/>20/35/75/90]
+    CR --> NI{intent_type<br/>等于 noise ?}
+    TB --> NI
+    TBR --> NI
+    SC --> NI
+    NT1 --> NI
+    NT2 --> NI
+    NI -->|是| NOISE[早退：不更新情绪<br/>返回 noise 回复]
+    NI -->|否| AU[auditor.audit]
+    AU --> EM[update_emotion]

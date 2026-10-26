@@ -1,0 +1,15 @@
+stateDiagram-v2
+    [*] --> Stored: 读 UserState.emotion_current
+    Stored --> Decayed: _apply_decay\n(每30min向50靠近10%,\nE<50时速率×0.5)
+    Decayed --> Habituated: _habituation_alpha\n(15min内同极性≥3次,\nα: 0.2→0.1→0.05)
+    Habituated --> Smoothed: delta = clamp(α×(target−E), ±5)
+    Smoothed --> Modulated: 性格调制\n(target<50: ×(1+(N−0.5)×0.5))\n(target>50: ×(1+(E−0.5)×0.3))
+    Modulated --> Clamped: 二次夹取 ±5（硬不变量）
+    Clamped --> Leveled: level_of()\nCRISIS≤15 / L2≤35 / L1≤45\nL0≤65 / P1≤85 / P2>85
+    Leveled --> Persisted: 写 UserState（event_key 幂等）
+    Persisted --> [*]
+
+    note right of Leveled
+        risk=True 时 level 强制 CRISIS
+        whitelist 用户 CRISIS 降级为 L2
+    end note
