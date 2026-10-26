@@ -1,79 +1,88 @@
-"""记忆路由。
+"""兼容层：阶段一的 ``memory.py`` 已被 ``memory_router.py`` 取代（阶段五）。
 
-优先级：宿主原生记忆（由 adapter 注入）> 外部记忆插件（Mem0 等）> 本地兜底。
+保留这个文件只为两件事：
+1. 老的 ``import memory`` 不会炸（CI 的 import 检查、第三方脚本可能还在用）；
+2. 旧的 ``MemoryRouter(cache_dir)`` 调用方式仍能工作 —— 内部转接到新的
+   :class:`memory_router.MemoryRouter` + :class:`LocalSQLiteProvider`。
 
-本地兜底用 diskcache 存最近若干轮对话，进程重启不丢，也不占内存。
+新代码请直接用 ``from memory_router import MemoryRouter, LocalSQLiteProvider``。
 """
 from __future__ import annotations
 
-import json
 import os
 from typing import Any, Optional
 
-from diskcache import Cache
+from memory_router import (  # noqa: F401  (重新导出，保持旧引用可用)
+    MEMORY_BLOCK_HEADER,
+    MEMORY_MAX_INJECT,
+    MEMORY_TTL_DAYS,
+    ExternalPluginProvider,
+    HostNativeProvider,
+    IMemoryProvider,
+    LocalSQLiteProvider,
+    MemoryItem,
+    MemoryRouter as _Router,
+)
 
-DEFAULT_MAX_TURNS = 8
+__all__ = [
+    "MemoryRouter",
+    "LocalMemory",
+    "LocalSQLiteProvider",
+    "HostNativeProvider",
+    "ExternalPluginProvider",
+    "IMemoryProvider",
+    "MEMORY_BLOCK_HEADER",
+    "MEMORY_TTL_DAYS",
+    "MEMORY_MAX_INJECT",
+    "MemoryItem",
+]
 
 
 class LocalMemory:
-    """基于 diskcache 的本地轻量记忆。"""
+    """旧接口适配：``LocalMemory(cache_dir)`` -> 本地 SQLite 兜底。
 
-    def __init__(self, cache_dir: str, max_turns: int = DEFAULT_MAX_TURNS):
-        os.makedirs(cache_dir, exist_ok=True)
-        self._cache = Cache(os.path.join(cache_dir, "memory"))
+    注意：阶段一的 diskcache 版本已废弃，现在统一走 SQLite（可 TTL、可统计）。
+    """
+
+    def __init__(self, cache_dir: str, max_turns: int = 8) -> None:
+        db_path = os.path.join(cache_dir, "memory.db")
+        self.provider = LocalSQLiteProvider(db_path)
         self.max_turns = max_turns
 
-    def _key(self, user_id: str) -> str:
-        return "turns:" + user_id
-
     def append(self, user_id: str, role: str, content: str) -> None:
-        turns = self._cache.get(self._key(user_id)) or []
-        turns.append({"role": role, "content": content})
-        if len(turns) > self.max_turns:
-            turns = turns[-self.max_turns:]
-        self._cache.set(self._key(user_id), turns)
+        import asyncio
+
+        asyncio.run(self.provider.store(user_id, str(content)))
 
     def recent(self, user_id: str, limit: int = 6) -> list[dict[str, Any]]:
-        turns = self._cache.get(self._key(user_id)) or []
-        return turns[-limit:]
+        import asyncio
+
+        facts = asyncio.run(self.provider.retrieve(user_id, ""))
+        return [{"role": "user", "content": fact} for fact in facts[-limit:]]
 
     def summary(self, user_id: str) -> str:
-        turns = self.recent(user_id)
-        if not turns:
-            return "（还没有可用的历史记忆）"
-        return "\n".join(t["role"] + ": " + t["content"] for t in turns)
+        return self.provider.digest(user_id, limit=self.max_turns)
 
     def clear(self, user_id: str) -> None:
-        self._cache.delete(self._key(user_id))
+        """兼容占位：SQLite 版本请用 ``purge_expired()`` 或直接删库。"""
 
 
-class MemoryRouter:
-    """统一入口：优先外部记忆，失败自动降级到本地。"""
+class MemoryRouter(_Router):
+    """旧签名 ``MemoryRouter(cache_dir)`` 的适配。
 
-    def __init__(self, cache_dir: str, external: Optional[Any] = None,
-                 max_turns: int = DEFAULT_MAX_TURNS):
-        # external 需要实现 search(user_id, query, limit) / add(user_id, text) 两个方法
-        self.external = external
-        self.local = LocalMemory(cache_dir, max_turns=max_turns)
+    新写法请用 :meth:`memory_router.MemoryRouter.build`。
+    """
 
-    def remember(self, user_id: str, user_message: str, bot_reply: str) -> None:
-        self.local.append(user_id, "user", user_message)
-        self.local.append(user_id, "assistant", bot_reply)
-        if self.external is not None:
-            try:
-                self.external.add(user_id, user_message)
-            except Exception:
-                pass  # 外部插件挂了不影响主流程
-
-    def recall(self, user_id: str, query: str = "", limit: int = 6) -> list[dict[str, Any]]:
-        if self.external is not None:
-            try:
-                hits = self.external.search(user_id, query, limit)
-                if hits:
-                    return hits
-            except Exception:
-                pass
-        return self.local.recent(user_id, limit)
-
-    def as_text(self, user_id: str) -> str:
-        return self.local.summary(user_id)
+    def __init__(
+        self,
+        cache_dir: Optional[str] = None,
+        external: Optional[Any] = None,
+        max_turns: int = 8,
+    ) -> None:
+        directory = cache_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+        local = LocalSQLiteProvider(os.path.join(directory, "memory.db"))
+        providers: list[Any] = []
+        if external is not None:
+            providers.append(HostNativeProvider(external))
+        super().__init__(providers, local)
+        self.local_memory = LocalMemory(directory, max_turns=max_turns)

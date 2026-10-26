@@ -1,8 +1,8 @@
 {
   "name": "fatfish-whisper-adapter",
   "display_name": "潜鱼潜语 · 情绪挂载",
-  "version": "0.1.0",
-  "description": "把宿主 Bot 的消息转发给 FatFish-Whisper 情绪机，执行返回的动作数组，并处理撤回掷骰与冷却。",
+  "version": "0.4.0",
+  "description": "宿主侧 Adapter：透传 platform_message_id 给情绪机，执行 actions（文本/拍一拍/表情包），按概率撤回并冷却，超时 3 秒立即降级。",
   "author": "FatFish-Whisper",
   "license": "MIT",
   "entry": "main.py",
@@ -12,29 +12,56 @@
   "host": {
     "type": "qq-bot",
     "compatible": ["napcat", "lagrange", "nonebot2", "onebot-v11", "*"],
-    "note": "manifest 字段名需按你实际使用的宿主（NapCat / NoneBot2 / Lagrange）的插件规范改名，逻辑代码可直接复用。"
+    "note": "宿主只需实现 HostAPI 的 4 个方法：send_text / send_poke / send_sticker / recall。send_text 与 send_sticker 必须返回平台的新 message_id，撤回依赖它。"
+  },
+  "requires_from_host": {
+    "platform_message_id": "宿主原生消息 ID（NapCat/OneBot 的 message_id），必须透传，用于 Core 入口判重",
+    "group_id": "群号，私聊为 null",
+    "is_at_bot": "是否 @ 了 Bot"
   },
   "config": {
     "core_api": {
       "type": "string",
       "default": "http://127.0.0.1:8000/api/v1/chat",
-      "description": "情绪机地址"
+      "env": "FFW_CORE_API",
+      "description": "情绪机 /api/v1/chat 地址"
     },
     "timeout_seconds": {
       "type": "number",
       "default": 3.0,
-      "description": "请求情绪机超时；超时后降级到原生 LLM 回复"
+      "env": "FFW_TIMEOUT",
+      "description": "请求情绪机总超时；超时立刻中断并降级，不让用户干等"
     },
-    "debounce_seconds": {
+    "connect_timeout_seconds": {
       "type": "number",
-      "default": 1.0,
-      "description": "同一用户连续消息的合并窗口"
+      "default": 1.5,
+      "env": "FFW_CONNECT_TIMEOUT",
+      "description": "建连超时（比总超时更短，快速失败）"
+    },
+    "typing_delay_min": {
+      "type": "number",
+      "default": 0.5,
+      "env": "FFW_TYPING_MIN",
+      "description": "多条文本动作之间的拟人打字延迟下限（秒）"
+    },
+    "typing_delay_max": {
+      "type": "number",
+      "default": 1.5,
+      "env": "FFW_TYPING_MAX",
+      "description": "多条文本动作之间的拟人打字延迟上限（秒）"
     },
     "recall_cooldown_seconds": {
       "type": "number",
       "default": 180,
-      "description": "同一用户两次撤回之间的最小间隔"
+      "env": "FFW_RECALL_COOLDOWN",
+      "description": "撤回成功后的冷却时间；期间该用户/群不再做任何撤回判定"
+    },
+    "fallback_text": {
+      "type": "string",
+      "default": "（网卡了……等我一下）",
+      "env": "FFW_FALLBACK_TEXT",
+      "description": "降级兜底话术（配置 native_llm 时优先用原生模型）"
     }
   },
-  "permissions": ["send_message", "send_poke", "recall_message"]
+  "permissions": ["send_message", "send_poke", "send_sticker", "recall_message"]
 }

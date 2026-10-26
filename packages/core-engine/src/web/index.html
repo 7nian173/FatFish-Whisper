@@ -4,8 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FatFish-Whisper 控制台</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<!-- 版本钉死 + SRI：浮动版本（vue@3）意味着 CDN 一换内容，浏览器就会执行新代码。
+     SRI 让内容指纹对不上时直接拒绝执行。 -->
+<script src="https://cdn.tailwindcss.com/3.4.16"
+        integrity="sha384-mS5Uq7sE90lgbBDN8xgf34ibEgbZo4gB3tfLY40ZRle+M188BQw8onzNHg6GUZaA"
+        crossorigin="anonymous"></script>
+<script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"
+        integrity="sha384-W/1Fp/LgAYO/oTn9Gs+PbeWuMuq1eQCnUMPCeg8POmMYchhzxctjEqtbiCIxDOON"
+        crossorigin="anonymous"></script>
 <style>
   body {
     background:
@@ -213,18 +219,23 @@ createApp({
   methods: {
     levelClass(level) {
       const map = {
-        L0: 'bg-teal-500/15 text-teal-300',
-        L1: 'bg-sky-500/15 text-sky-300',
-        L2: 'bg-amber-500/15 text-amber-300',
         CRISIS: 'bg-rose-500/15 text-rose-300',
+        L2: 'bg-amber-500/15 text-amber-300',
+        L1: 'bg-sky-500/15 text-sky-300',
+        L0: 'bg-teal-500/15 text-teal-300',
+        P1: 'bg-emerald-500/15 text-emerald-300',
+        P2: 'bg-fuchsia-500/15 text-fuchsia-300',
       };
       return map[level] || 'bg-slate-600/20 text-slate-300';
     },
+    // 与后端 level_of 的分段严格对齐：0-15 / 16-35 / 36-45 / 46-65 / 66-85 / 86-100
     barClass(emotion) {
-      if (emotion <= 20) return 'bg-rose-500';
-      if (emotion <= 40) return 'bg-amber-400';
+      if (emotion <= 15) return 'bg-rose-500';
+      if (emotion <= 35) return 'bg-amber-500';
+      if (emotion <= 45) return 'bg-amber-400';
       if (emotion <= 65) return 'bg-sky-400';
-      return 'bg-teal-400';
+      if (emotion <= 85) return 'bg-teal-400';
+      return 'bg-fuchsia-400';
     },
     async refresh() {
       this.stateLoading = true;
@@ -290,14 +301,17 @@ createApp({
       }
     },
     async get(url) {
-      const resp = await fetch(url);
+      // 管理接口（/api/v1/admin/*）要求 X-FFW-Admin，防跨站读取
+      const resp = await fetch(url, { headers: { 'X-FFW-Admin': '1' } });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       return resp.json();
     },
     async post(url, body) {
       const resp = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // x-ffw-admin 是服务端要求的写保护头：跨站请求带自定义头会触发预检，
+        // 而本服务不返回 CORS 头，浏览器会直接拦掉，从而阻断 CSRF。
+        headers: { 'Content-Type': 'application/json', 'X-FFW-Admin': '1' },
         body: JSON.stringify(body),
       });
       const data = await resp.json().catch(() => ({}));

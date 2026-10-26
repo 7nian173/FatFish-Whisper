@@ -85,24 +85,38 @@ fatfish-whisper/
     │   ├── app.db           # SQLite 数据库（首次启动自动生成，已 gitignore）
     │   └── src/
     │       ├── main.py      # FastAPI 入口
-    │       ├── engine.py    # 双轨判定 / 平滑更新 / 防抖
-    │       ├── memory.py    # 本地轻量记忆 + 外部记忆挂载点
-    │       ├── models/
-    │       │   └── db_models.py
+    │       ├── engine.py    # 双轨判定 / 平滑更新 / 衰减 / 防抖 / 跨进程锁
+    │       ├── models.py    # SQLAlchemy 表定义（UserState / TokenLog / MessageCount）
+    │       ├── prompt_builder.py  # 内心 OS 与三段式 Prompt 构造
+    │       ├── memory_router.py   # 插拔式记忆：宿主 > 外部插件 > SQLite 兜底（7 天 TTL）
+    │       ├── memory.py    # 阶段一旧接口兼容层
+    │       ├── evolution.py # 7 日演化：备份 / 追加词 / OOC 探针 / 膨胀压缩
+    │       ├── monitor.py   # Token 监控切面（按模块记账）
     │       └── web/
     │           ├── index.html   # 单页管理面板 (Vue3 + Tailwind CDN)
     │           └── static/
     └── adapter-qq-agent/    # 宿主 Bot 侧插件
         ├── manifest.json
-        └── main.py
+        ├── main.py          # 入口（FatFishAdapter 门面）
+        ├── simulate_duplicate.py  # 阶段四验收脚本（重推判重 + 撤回 + 降级）
+        ├── tests/
+        └── fatfish_adapter/ # 独立包（避免与 core 的 models/main 抢模块名）
+            ├── models.py        # InboundEvent / Action / CoreReply
+            ├── host.py          # HostAPI 协议 + MockHostAPI
+            ├── core_client.py   # 3s 超时 + 立即降级
+            ├── executor.py      # text / poke / sticker + 拟人打字延迟
+            ├── recall.py        # 撤回掷骰 + 冷却
+            └── service.py       # 串成一条流水线
 ```
 
 ## 🔌 核心接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v1/chat` | Adapter 调用：传入 `user_id` + `message`，返回动作数组与内心 OS |
+| POST | `/api/v1/chat` | Adapter 调用：传 `platform_message_id` + `user_id` + `message`（可选 `group_id` / `is_at_bot`），返回动作数组与内心 OS；重推会返回 `status=duplicate` |
 | GET | `/api/v1/state` | 状态看板：所有用户当前情绪值 / 好感度 / 等级 |
+| GET | `/api/v1/admin/token_stats` | 今日各模块 token 消耗（`?day=YYYY-MM-DD` 可查历史） |
+| GET | `/api/v1/admin/memory_health` | 记忆路由各层健康度（排查到底在用哪一级记忆） |
 | GET | `/api/v1/config` | 读取 LLM 配置（Key 脱敏） |
 | POST | `/api/v1/config` | 写入 LLM 配置到 `.env` |
 | GET | `/admin` | 可视化管理后台 |
@@ -146,6 +160,51 @@ E_current  = clamp(E_prev + delta, 0, 100)
 - [ ] Adapter 多宿主适配（NapCat / Lagrange / NoneBot2）
 - [ ] 管理后台图表化（情绪曲线、好感度趋势）
 - [ ] 单元测试（pytest）
+
+## 🔐 部署与安全配置
+
+HTTP 层有四道顺序防线：**来源识别 → Host 校验 → 鉴权模式 → 管理头**，
+配置错了会在**启动期直接失败**（不是运行时静默降级）。
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `AUTH_MODE` | `loopback` | `loopback`：只服务本机（`127.0.0.1` / `localhost` / `::1`），非回环来源一律 403。`token`：一切以 `CORE_TOKEN` 为准，回环也不例外。取其它值 → 启动即报错退出（不会静默退回 loopback）。 |
+| `CORE_TOKEN` | 空 | 令牌，`AUTH_MODE=token` 时必填且**至少 16 字符**，否则启动失败。 |
+| `CORE_HOST` | `127.0.0.1` | 绑定地址。`AUTH_MODE=loopback` 时必须解析为回环地址，绑 `0.0.0.0` 会拒绝启动。 |
+| `CORE_EXTRA_HOSTS` | 空 | **Host 白名单**（逗号分隔，只写主机名/域名，不要带端口）。默认只放行 `127.0.0.1`、`localhost`、`::1`；用域名或反向代理访问时**必须把对外域名加进来**，否则一律 400。例：`CORE_EXTRA_HOSTS=bot.example.com,core.internal`。 |
+
+- `AUTH_MODE=loopback`（默认）下若配了 `CORE_TOKEN`，启动会打印告警
+  「已配置 CORE_TOKEN 但 AUTH_MODE 未生效：**令牌不会生效**」——
+  这是**告警不是错误**：本机 Adapter 行为保持不变，令牌确实不参与判断；
+  想让令牌生效请显式设 `AUTH_MODE=token`。
+- `GET /api/v1/health` 是探活接口，不需要令牌（`token` 模式下响应只含 `status`）。
+- 管理接口 `GET /api/v1/admin/*` 与写接口 `POST /api/v1/config` 需要请求头
+  `X-FFW-Admin: 1`；`AUTH_MODE=token` 下 `/admin` 后台页同样需要（由反代注入）。
+- 反向代理转发链（`X-Forwarded-For` 信任策略）属于后续 PR 范围，**当前版本按直连来源判断**。
+
+### token 模式的反向代理（Nginx 示例）
+
+token 模式下必须**同时注入两个头**：`Authorization`（令牌）与 `X-FFW-Admin`（管理头），
+否则 `/api/v1/*` 会 401、`/admin` 与 `POST /api/v1/config` 会 403。
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name bot.example.com;          # 必须同时写进 CORE_EXTRA_HOSTS
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host            bot.example.com;
+        proxy_set_header Authorization   "Bearer <填写与 CORE_TOKEN 相同的值>";
+        proxy_set_header X-FFW-Admin     1;
+    }
+}
+```
+
+对应启动配置：`AUTH_MODE=token`、`CORE_TOKEN=<≥16 字符随机串>`、
+`CORE_EXTRA_HOSTS=bot.example.com`、`CORE_HOST=127.0.0.1`（由反代对外暴露）。
 
 ## ❓ 常见问题
 

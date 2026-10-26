@@ -1,7 +1,7 @@
 # FatFish-Whisper Core-Engine 依赖
 # 用下限版本而非死钉：Python 3.14 下旧钉死版本（pydantic 2.5.x 等）没有预编译轮子。
 fastapi>=0.115
-uvicorn[standard]>=0.30
+uvicorn[standard]>=0.54,<0.55
 pydantic>=2.9
 httpx>=0.27
 sqlalchemy>=2.0.36
