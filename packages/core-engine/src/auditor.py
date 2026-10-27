@@ -4,7 +4,9 @@
 --------
 1. **规则拦截层**：硬安全死线（NSFW / 政治敏感 / 暴力自伤 / AI 身份暴露）。
    这一层**永远在概率解禁之前**执行，且解禁**不能**绕过它。
-2. **连续刺激计数**：同一用户 5 分钟内连续同极性刺激累加，换极性则重置。
+2. **连续刺激计数**：同一用户在同一会话分区内 5 分钟连续同极性刺激累加，
+   换极性则重置。计数**按 ``(user_id, chat_scope)`` 分房**（I-26：理由分房）——
+   在 A 群连夸三次不该让 B 群的第一句就直接满足解禁条件。
 3. **概率解禁**：连续刺激够多时，按概率放开「傲娇 / 嘴硬 / 冷淡」这类**人设限制**，
    让 Bot 出现结巴、破防、中二爆发等拟人反应。
 
@@ -123,7 +125,7 @@ BLOCK_DIRECTIVES: Final[dict[str, str]] = {
 
 @dataclass
 class _Stimulus:
-    """单个用户的刺激窗口。"""
+    """单个 ``(user_id, chat_scope)`` 分区内的刺激窗口。"""
 
     polarity: int = 0
     count: int = 0
@@ -147,7 +149,9 @@ class SubconsciousAuditor:
         self._rng = rng or random.Random()
         self._clock = clock
         self._lock = threading.Lock()
-        self._stimuli: dict[str, _Stimulus] = {}
+        # 键是 (user_id, chat_scope) 元组：理由必须分房（I-26），
+        # 否则「在 A 群被连夸三次」会让 B 群第一句话就命中解禁概率。
+        self._stimuli: dict[tuple[str, str], _Stimulus] = {}
         # H-A2：缓存维护状态（惰性清理 + 指标）
         self._last_prune_at: float = 0.0
         self._pruned_total: int = 0
@@ -176,11 +180,12 @@ class SubconsciousAuditor:
             return 0
         return 1 if offset > 0 else -1
 
-    def _bump(self, user_id: str, polarity: int) -> int:
-        """更新窗口并返回当前连续次数。"""
+    def _bump(self, user_id: str, polarity: int, chat_scope: str = "") -> int:
+        """更新窗口并返回当前连续次数（按 ``(user_id, chat_scope)`` 分房）。"""
         now = self._clock()
+        key = (str(user_id), str(chat_scope))
         with self._lock:
-            state = self._stimuli.setdefault(user_id, _Stimulus())
+            state = self._stimuli.setdefault(key, _Stimulus())
             if polarity == 0:
                 state.polarity, state.count = 0, 0
                 return 0
@@ -217,8 +222,14 @@ class SubconsciousAuditor:
         traits: Any = None,
         *,
         allow_unlock: bool = True,
+        chat_scope: str = "",
     ) -> AuditResult:
-        """主入口：先规则拦截，再计数，最后按概率解禁。"""
+        """主入口：先规则拦截，再计数，最后按概率解禁。
+
+        Args:
+            chat_scope: 会话分区（``g:<群号>`` / ``p:<QQ号>``）。刺激计数按它分房；
+                默认空串只用于兼容老调用方。
+        """
         # ---- 缓存维护：惰性清理过期条目（异常绝不影响判定）----
         self._maybe_prune()
         # ① 规则拦截永远最先执行，解禁不能绕过
@@ -227,7 +238,7 @@ class SubconsciousAuditor:
             return blocked
 
         polarity = self.polarity_of(target)
-        counter = self._bump(user_id, polarity)
+        counter = self._bump(user_id, polarity, chat_scope)
         if not allow_unlock or polarity == 0 or counter < UNLOCK_MIN_COUNT:
             return AuditResult(action="pass", counter=counter, probability=0.0)
 
@@ -239,7 +250,7 @@ class SubconsciousAuditor:
         directive = self._rng.choice(pool)
         # 破防之后要「收回来」：重置窗口，否则概率顶到上限后会每轮都解禁，
         # 从「偶尔绷不住」变成「一直在绷不住」，反而不像人。
-        self.reset(user_id)
+        self.reset(user_id, chat_scope)
         return AuditResult(
             action="unlock",
             reason="连续刺激 {0} 次（{1}）".format(counter, "正向" if polarity > 0 else "负向"),
@@ -250,12 +261,24 @@ class SubconsciousAuditor:
 
     # ---------------------------------------------------------- 维护
 
-    def reset(self, user_id: Optional[str] = None) -> None:
+    def reset(
+        self, user_id: Optional[str] = None, chat_scope: Optional[str] = None
+    ) -> None:
+        """清空刺激窗口。
+
+        - ``reset()``：全清；
+        - ``reset(user_id)``：清掉该用户**所有分区**（老调用方的语义，保持兼容）；
+        - ``reset(user_id, chat_scope)``：只清该分区（解禁后「收回来」用这个）。
+        """
         with self._lock:
             if user_id is None:
                 self._stimuli.clear()
-            else:
-                self._stimuli.pop(user_id, None)
+                return
+            if chat_scope is None:
+                for key in [k for k in self._stimuli if k[0] == str(user_id)]:
+                    del self._stimuli[key]
+                return
+            self._stimuli.pop((str(user_id), str(chat_scope)), None)
 
     # ---------------------------------------------------------- 缓存维护（H-A2）
 
@@ -280,18 +303,20 @@ class SubconsciousAuditor:
         """
         with self._lock:
             moment = self._clock() if now is None else float(now)
+            # 键是 (user_id, chat_scope) 元组：淘汰逻辑按「分区条目」计数与删除，
+            # 不能按 user_id 去重（否则同一个人多分区时会漏删 / 多删）。
             stale = [
-                uid for uid, state in self._stimuli.items()
+                key for key, state in self._stimuli.items()
                 if moment - state.last_at > STIMULUS_TTL_SECONDS
             ]
-            for uid in stale:
-                del self._stimuli[uid]
+            for key in stale:
+                del self._stimuli[key]
             pruned = len(stale)
             overflow = len(self._stimuli) - STIMULUS_CACHE_MAX
             if overflow > 0:
                 oldest = sorted(self._stimuli.items(), key=lambda kv: kv[1].last_at)
-                for uid, _state in oldest[:overflow]:
-                    del self._stimuli[uid]
+                for key, _state in oldest[:overflow]:
+                    del self._stimuli[key]
                 pruned += overflow
             self._pruned_total += pruned
             self._last_prune_at = moment
@@ -306,9 +331,10 @@ class SubconsciousAuditor:
                 "stimulus_last_prune_at": self._last_prune_at,
             }
 
-    def snapshot(self, user_id: str) -> dict[str, Any]:
+    def snapshot(self, user_id: str, chat_scope: str = "") -> dict[str, Any]:
+        """读某分区的刺激窗口快照（默认空串 = 兼容期老分区）。"""
         with self._lock:
-            state = self._stimuli.get(user_id)
+            state = self._stimuli.get((str(user_id), str(chat_scope)))
             if state is None:
                 return {"polarity": 0, "count": 0}
             return {"polarity": state.polarity, "count": state.count}

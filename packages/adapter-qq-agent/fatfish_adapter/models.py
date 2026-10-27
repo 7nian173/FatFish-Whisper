@@ -29,8 +29,18 @@ class Target:
 
     @property
     def key(self) -> str:
-        """用于冷却/日志的稳定标识。"""
+        """用于冷却/日志的稳定标识 —— 同时也是 Core 的 ``chat_scope`` 形状。"""
         return "g:" + str(self.group_id) if self.is_group else "p:" + str(self.user_id)
+
+    @property
+    def chat_scope(self) -> str:
+        """透传给 Core 的会话分区（``g:<群号>`` / ``p:<QQ号>``）。
+
+        与 :attr:`key` 同一个值，但语义分开：``key`` 是 Adapter 内部标识，
+        ``chat_scope`` 是 Core 的分房键。两者形状一致是刻意的——
+        Core 侧只校验形状，不重新派生。
+        """
+        return self.key
 
     def __str__(self) -> str:  # pragma: no cover - 仅日志
         return self.key
@@ -68,8 +78,11 @@ class InboundEvent:
             "user_id": self.user_id,
             "message": self.message,
             "is_at_bot": self.is_at_bot,
-            # Adapter 侧已做防抖（合并窗口），Core 不需要再合并
-            "debounce": False,
+            # 防抖归属：**Core 是唯一权威**（规格 P0-11）。Adapter 只声明「请合并」，
+            # 不再自己开窗口，避免两侧各合并一次导致丢消息。
+            "debounce": True,
+            # 会话分区：Core 按它给情绪/记忆分房（I-26）
+            "chat_scope": self.target.chat_scope,
         }
         if self.group_id is not None:
             payload["group_id"] = str(self.group_id)

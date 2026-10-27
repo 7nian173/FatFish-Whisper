@@ -46,7 +46,8 @@ def test_窗口内条目保留():
 
     advance(STIMULUS_TTL_SECONDS - 1)
     assert aud.prune() == 0
-    assert "u-a" in aud._stimuli
+    # 分房改造后键是 (user_id, chat_scope) 元组；_bump 不传 scope 即空串分区
+    assert ("u-a", "") in aud._stimuli
 
 
 def test_恰好等于TTL不算过期():
@@ -56,7 +57,7 @@ def test_恰好等于TTL不算过期():
 
     advance(STIMULUS_TTL_SECONDS)
     assert aud.prune() == 0
-    assert "u-a" in aud._stimuli
+    assert ("u-a", "") in aud._stimuli
 
 
 def test_容量上限淘汰最旧():
@@ -70,8 +71,9 @@ def test_容量上限淘汰最旧():
 
     assert pruned == 1
     assert len(aud._stimuli) == STIMULUS_CACHE_MAX
-    assert "user-0000" not in aud._stimuli, "最旧的应先被淘汰"
-    assert "user-%04d" % STIMULUS_CACHE_MAX in aud._stimuli
+    # 键是 (user_id, chat_scope)：淘汰按「分区条目」计数，这里 scope 均为空串
+    assert ("user-0000", "") not in aud._stimuli, "最旧的应先被淘汰"
+    assert ("user-%04d" % STIMULUS_CACHE_MAX, "") in aud._stimuli
 
 
 def test_reset立即移除与prune不重复():

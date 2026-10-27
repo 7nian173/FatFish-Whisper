@@ -10,6 +10,17 @@
    避免 SQLite 里混入带时区的 aware datetime 造成比较报错。
 4. ``ensure_schema()`` 提供极轻量的 SQLite 列补齐迁移（只做 ADD COLUMN），
    用于兼容阶段一遗留的 ``app.db``（例如 token_logs 的旧列名 ``module_type``）。
+5. ``migrate_chat_scope()`` 做两件 ``create_all`` / ``ADD COLUMN`` 都做不到的事：
+   ``user_states`` 的主键改造（复合主键只能重建表）与 ``affinity_raw`` 拆表。
+
+I-26 裁决（锚点全局、情绪分房、理由分房）
+-----------------------------------------
+- :class:`UserAffinity`（好感度）**全局**，只有 ``user_id`` 一个主键，没有 ``chat_scope``；
+- :class:`BotMood`（它自己的心情）**全局**，单行；
+- :class:`UserState`（对某个人的情绪）按 ``(user_id, chat_scope)`` **严格分房**。
+
+``chat_scope`` 取值只有两种形状：``g:<group_id>``（群）与 ``p:<user_id>``（私聊），
+由 ``main.py`` 在请求解析处**唯一一次**派生，下游模块禁止自拼。
 """
 from __future__ import annotations
 
@@ -23,14 +34,19 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 __all__ = [
     "Base",
     "UserState",
+    "UserAffinity",
     "BotMood",
     "TokenLog",
     "MessageCount",
     "utcnow",
     "ensure_schema",
+    "migrate_chat_scope",
     "DEFAULT_EMOTION",
     "DEFAULT_LEVEL",
     "DEFAULT_AFFINITY",
+    "DEFAULT_CHAT_SCOPE",
+    "SCOPE_GROUP_PREFIX",
+    "SCOPE_PRIVATE_PREFIX",
 ]
 
 # ---------------------------------------------------------------- 常量
@@ -38,6 +54,19 @@ __all__ = [
 DEFAULT_EMOTION: Final[int] = 50      # 平静基准值（0-100）
 DEFAULT_LEVEL: Final[str] = "L0"      # 默认等级
 DEFAULT_AFFINITY: Final[int] = 0      # 好感度默认值，无上限
+
+#: 会话分区的**兼容期默认值**（空串）。
+#:
+#: 为什么是空串而不是 ``p:<user_id>``：老库里的行是在分房之前写下的，它们既可能来自
+#: 群聊也可能来自私聊，**没有任何可靠依据可以推断**。把 ``""`` 静默当成
+#: ``p:<user_id>`` 会让老数据被新逻辑误读（私聊分区凭空多出一份历史情绪，群聊分区
+#: 又凭空丢掉它）。因此约定：**老数据保持 ``""``，新写入一律用真实 scope**，
+#: ``""`` 只作为「分房之前的历史分区」存在，不参与任何跨房合并。
+DEFAULT_CHAT_SCOPE: Final[str] = ""
+
+#: ``chat_scope`` 的两种合法前缀（派生点唯一：``main.py`` 的请求解析处）。
+SCOPE_GROUP_PREFIX: Final[str] = "g:"
+SCOPE_PRIVATE_PREFIX: Final[str] = "p:"
 
 
 def utcnow() -> datetime.datetime:
@@ -56,28 +85,34 @@ class Base(DeclarativeBase):
 
 
 class UserState(Base):
-    """单个用户的情绪 / 好感度状态。
+    """某个用户在**某个会话分区**里的情绪状态（I-26：情绪分房）。
 
     Attributes:
-        user_id: 宿主侧稳定用户 ID（主键）。
+        user_id: 宿主侧稳定用户 ID（复合主键第一列）。
+        chat_scope: 会话分区，``g:<group_id>`` 或 ``p:<user_id>``；
+            兼容期老数据为 ``""``（见 :data:`DEFAULT_CHAT_SCOPE`）。
         emotion_current: 平滑后的当前情绪值，0-100。
         emotion_level: 稳定等级，L0 / L1 / L2 / CRISIS。
-        affinity_raw: 好感度原始值，无上限（可以为负）。
         last_update: 最近一次写入时间（UTC naive），用于半衰期衰减。
         last_event_key: 最近一次生效的 event_key（幂等去重用）。
+
+    Note:
+        **好感度不在这里**。``affinity_raw`` 曾经是本表的一列，改成复合主键后
+        同一个用户会有多行，好感度就会被意外分房（违反 I-26），因此已拆到全局表
+        :class:`UserAffinity`。
     """
 
     __tablename__ = "user_states"
 
     user_id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    chat_scope: Mapped[str] = mapped_column(
+        String, primary_key=True, default=DEFAULT_CHAT_SCOPE, nullable=False
+    )
     emotion_current: Mapped[int] = mapped_column(
         Integer, default=DEFAULT_EMOTION, nullable=False
     )
     emotion_level: Mapped[str] = mapped_column(
         String, default=DEFAULT_LEVEL, nullable=False
-    )
-    affinity_raw: Mapped[int] = mapped_column(
-        Integer, default=DEFAULT_AFFINITY, nullable=False
     )
     last_update: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=utcnow, nullable=False
@@ -90,27 +125,61 @@ class UserState(Base):
         """转成纯字典（方便调试 / 日志，不参与业务逻辑）。"""
         return {
             "user_id": self.user_id,
+            "chat_scope": self.chat_scope,
             "emotion_current": int(self.emotion_current),
             "emotion_level": self.emotion_level,
-            "affinity_raw": int(self.affinity_raw),
             "last_update": self.last_update,
             "last_event_key": self.last_event_key,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
         return (
-            "<UserState user_id={0!r} emotion={1} level={2!r} affinity={3}>".format(
-                self.user_id, self.emotion_current, self.emotion_level, self.affinity_raw
+            "<UserState user_id={0!r} scope={1!r} emotion={2} level={3!r}>".format(
+                self.user_id, self.chat_scope, self.emotion_current, self.emotion_level
             )
         )
 
 
+class UserAffinity(Base):
+    """好感度（I-26 裁决：**锚点全局，不分房**）。
+
+    为什么单独一张表：``user_states`` 改成 ``(user_id, chat_scope)`` 复合主键后，
+    同一用户在每个群都会有一行；好感度若还留在那一行里，就会变成「A 群 20、B 群 80」，
+    这是把锚点当成情绪分房，违反 I-26。因此好感度独立成表，只有 ``user_id`` 一个键。
+
+    ``engine._read_affinity`` / ``_write_affinity`` 的签名里**没有** ``chat_scope``
+    参数——在签名层面就杜绝好感度被分房。
+    """
+
+    __tablename__ = "user_affinity"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    affinity_raw: Mapped[int] = mapped_column(
+        Integer, default=DEFAULT_AFFINITY, nullable=False
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, default=utcnow, nullable=False
+    )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "affinity_raw": int(self.affinity_raw),
+            "updated_at": self.updated_at,
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试用
+        return "<UserAffinity user_id={0!r} affinity={1}>".format(
+            self.user_id, self.affinity_raw
+        )
+
+
 class BotMood(Base):
-    """Bot **自己的**情绪（全局单行，不随用户变化）。
+    """Bot **自己的**情绪（全局单行，不随用户变化，也不随会话分区变化）。
 
     与 :class:`UserState` 的区别
     ----------------------------
-    - ``UserState`` 是「它对**某个人**的情绪」，按 ``user_id`` 隔离；
+    - ``UserState`` 是「它对**某个人在某个群里**的情绪」，按 ``(user_id, chat_scope)`` 隔离；
     - ``BotMood`` 是「它**自己**的心情」，全局一份，被所有交互缓慢影响。
 
     典型表现：被 A 骂了会闷，转头跟 B 说话时语气还没缓过来。
@@ -176,6 +245,9 @@ class TokenLog(Base):
 class MessageCount(Base):
     """按天累计的消息条数（演化系统判断「今天这个用户活不活跃」）。
 
+    保持**全局按用户**计数（不分房）：活跃度闸门问的是「这个人今天还来不来」，
+    与他在哪个群说话无关。
+
     Attributes:
         user_id: 用户 ID。
         day: ``YYYY-MM-DD``（UTC）。
@@ -240,4 +312,113 @@ def ensure_schema(bind: Engine) -> list[str]:
             except Exception:
                 # 迁移失败不应阻止服务启动
                 continue
+    return applied
+
+
+#: 重建后的 ``user_states`` 结构（SQLite 专用：改主键只能重建表）。
+_USER_STATES_NEW_DDL: Final[str] = (
+    "CREATE TABLE user_states__new ("
+    " user_id VARCHAR NOT NULL,"
+    " chat_scope VARCHAR NOT NULL DEFAULT '',"
+    " emotion_current INTEGER NOT NULL DEFAULT 50,"
+    " emotion_level VARCHAR NOT NULL DEFAULT 'L0',"
+    " last_update DATETIME NOT NULL,"
+    " last_event_key VARCHAR,"
+    " PRIMARY KEY (user_id, chat_scope))"
+)
+
+
+def migrate_chat_scope(bind: Engine) -> list[str]:
+    """``chat_scope`` 分房迁移：``user_states`` 复合主键 + 好感度拆表。
+
+    为什么必须自己动手：``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表加列，
+    更不会改主键；SQLite 也不支持 ``ALTER TABLE ... ADD PRIMARY KEY``。所以主键
+    改造只能「建新表 → 搬数据 → 删旧表 → 改名」。
+
+    幂等性：每一步都先 ``PRAGMA table_info`` 判断当前结构，已是目标结构就直接返回
+    （连续跑两次，第二次返回空列表、不写任何字节）。
+
+    Args:
+        bind: SQLAlchemy Engine。
+
+    Returns:
+        实际执行的 DDL / DML 语句列表（供调用方打日志）。
+    """
+    applied: list[str] = []
+    try:
+        inspector = sa_inspect(bind)
+        if "user_states" not in set(inspector.get_table_names()):
+            return applied  # 新库：create_all 已经建出目标结构
+        columns = {col["name"] for col in inspector.get_columns("user_states")}
+    except Exception:  # 反射失败时宁可不动库
+        return applied
+
+    has_affinity = "affinity_raw" in columns
+    has_scope = "chat_scope" in columns
+    if not has_affinity and has_scope:
+        # 已是目标结构：只补索引（老库可能没建过）
+        try:
+            with bind.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS idx_user_states_scope"
+                        " ON user_states(chat_scope)"
+                    )
+                )
+        except Exception:
+            pass
+        return applied
+
+    # ---- ① 好感度先搬走：拆表之前它还在 user_states 里 ----
+    if has_affinity:
+        copy_affinity = (
+            "INSERT OR IGNORE INTO user_affinity (user_id, affinity_raw, updated_at)"
+            " SELECT user_id, COALESCE(affinity_raw, 0),"
+            " COALESCE(last_update, CURRENT_TIMESTAMP) FROM user_states"
+        )
+        try:
+            with bind.begin() as conn:
+                conn.execute(text(copy_affinity))
+            applied.append(copy_affinity)
+        except Exception:
+            # 搬不动就不能继续拆表，否则好感度数据会丢
+            return applied
+
+    # ---- ② 重建 user_states：加 chat_scope 复合主键、去掉 affinity_raw ----
+    # 老库可能连 last_event_key / last_update 都没有（阶段一），按实际列拼 SELECT。
+    select_scope = "COALESCE(chat_scope, '')" if has_scope else "''"
+    select_event_key = "last_event_key" if "last_event_key" in columns else "NULL"
+    select_last_update = (
+        "COALESCE(last_update, CURRENT_TIMESTAMP)"
+        if "last_update" in columns
+        else "CURRENT_TIMESTAMP"
+    )
+    copy_rows = (
+        "INSERT INTO user_states__new"
+        " (user_id, chat_scope, emotion_current, emotion_level, last_update, last_event_key)"
+        " SELECT user_id, {0}, COALESCE(emotion_current, 50),"
+        " COALESCE(emotion_level, 'L0'), {1}, {2} FROM user_states".format(
+            select_scope, select_last_update, select_event_key
+        )
+    )
+    steps = [
+        _USER_STATES_NEW_DDL,
+        copy_rows,
+        "DROP TABLE user_states",
+        "ALTER TABLE user_states__new RENAME TO user_states",
+        "CREATE INDEX IF NOT EXISTS ix_user_states_user_id ON user_states(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_user_states_scope ON user_states(chat_scope)",
+    ]
+    try:
+        with bind.begin() as conn:
+            for ddl in steps:
+                conn.execute(text(ddl))
+        applied.extend(steps)
+    except Exception:
+        # 重建失败：清掉半成品新表，旧表原样保留（服务继续用旧结构启动）
+        try:
+            with bind.begin() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS user_states__new"))
+        except Exception:
+            pass
     return applied

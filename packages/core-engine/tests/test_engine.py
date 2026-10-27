@@ -95,19 +95,30 @@ def test_更新情绪不覆盖affinity_raw(engine_factory):
 
 def test_models_表结构():
     user_columns = set(models_module.UserState.__table__.columns.keys())
+    # I-26 分房改造：新增 chat_scope（复合主键第二列），affinity_raw 拆到全局表。
+    # 原断言要求 UserState 含 affinity_raw；改为主键改造后它必须**不在**这里，
+    # 否则同一用户每个群一行会让好感度被意外分房（违反「锚点全局」）。
     assert user_columns == {
         "user_id",
+        "chat_scope",
         "emotion_current",
         "emotion_level",
-        "affinity_raw",
         "last_update",
         "last_event_key",
-    }, "UserState 必须是 5 个状态字段 + last_event_key 幂等字段"
+    }, "UserState 必须是 (user_id, chat_scope) 复合主键 + 4 个状态字段"
 
     table = models_module.UserState.__table__
     assert table.c.emotion_current.default.arg == 50
     assert table.c.emotion_level.default.arg == "L0"
-    assert table.c.affinity_raw.default.arg == 0
+    assert list(table.primary_key.columns.keys()) == ["user_id", "chat_scope"], (
+        "UserState 必须是复合主键，否则同一个人在不同群无法分房"
+    )
+
+    # 好感度拆表后的形状：全局单键，**不许**有 chat_scope
+    affinity_columns = set(models_module.UserAffinity.__table__.columns.keys())
+    assert affinity_columns == {"user_id", "affinity_raw", "updated_at"}
+    assert "chat_scope" not in affinity_columns, "好感度是全局锚点，不得分房"
+    assert models_module.UserAffinity.__table__.c.affinity_raw.default.arg == 0
 
     token_columns = set(models_module.TokenLog.__table__.columns.keys())
     assert "module" in token_columns, "TokenLog 必须有 module 字段"

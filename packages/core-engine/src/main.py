@@ -155,6 +155,11 @@ class ChatRequest(BaseModel):
         "有它就用它做入口判重与幂等，比文本启发式准得多。",
     )
     group_id: Optional[str] = Field(default=None, description="群号；私聊为 None")
+    chat_scope: Optional[str] = Field(
+        default=None,
+        description="会话分区，``g:<群号>`` 或 ``p:<QQ号>``。不传则由 group_id 派生"
+        "（群聊 g:<群号>，否则 p:<user_id>）。**派生只发生在这里一次**，下游禁止自拼。",
+    )
     is_at_bot: bool = Field(default=False, description="这条消息是否 @ 了 Bot")
     event_key: Optional[str] = Field(
         default=None,
@@ -362,15 +367,44 @@ async def config_set(req: ConfigRequest) -> dict[str, Any]:
     }
 
 
+def derive_chat_scope(
+    user_id: str, group_id: Optional[str] = None, explicit: Optional[str] = None
+) -> str:
+    """派生 ``chat_scope``——**全仓唯一的派生点**（规格 §7/§8）。
+
+    规则（顺序固定）：
+        1. 调用方显式传入的 ``chat_scope`` 优先（Adapter 已按自己的 Target 算好时用）；
+        2. ``group_id`` strip 后非空 → ``g:<group_id>``；
+        3. 其余（含空串 / 纯空白 / None）→ ``p:<user_id>``。
+
+    为什么空串 group_id 不能推成 ``"g:"``：``"g:"`` 不是一个合法分区，它会让所有
+    「群号缺失」的用户挤进同一个假群，把彼此的情绪和记忆混在一起。宁可退化为私聊
+    分区，也不制造一个共享的伪分区。
+    """
+    if explicit is not None:
+        cleaned = str(explicit).strip()
+        if cleaned:
+            return cleaned
+    group = "" if group_id is None else str(group_id).strip()
+    if group:
+        return "g:" + group
+    return "p:" + str(user_id)
+
+
 @app.post("/api/v1/chat")
 async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     engine = getattr(app.state, "engine", None)
     if engine is None:
         raise HTTPException(status_code=503, detail="引擎尚未就绪")
 
+    # 会话分区在这里派生**唯一一次**，之后一路透传（引擎内部禁止自拼）。
+    # 必须早于判重：判重键要含分区，否则同一个人在 A 群和 B 群说同一句话时，
+    # 第二条会被当成幽灵消息直接吞掉（跨群串味的另一种形态）。
+    chat_scope = derive_chat_scope(req.user_id, req.group_id, req.chat_scope)
+
     # ---- 入口判重（幽灵消息）：有平台 message_id 就按 id 判，没有退化为文本短窗口 ----
     if engine.ingress_deduper.is_duplicate(
-        req.user_id, req.message, req.platform_message_id
+        req.user_id, req.message, req.platform_message_id, chat_scope
     ):
         return {
             "status": "duplicate",
@@ -395,6 +429,7 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
             req.message,
             debounce=req.debounce,
             event_key=event_key,
+            chat_scope=chat_scope,
         )
     except Exception as exc:  # 兜底：绝不让情绪机把宿主 Bot 拖挂
         raise HTTPException(status_code=500, detail="判定失败: " + str(exc))
@@ -402,6 +437,7 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     payload["status"] = "ok"
     payload["duplicate"] = False
     payload["platform_message_id"] = req.platform_message_id
+    payload["chat_scope"] = chat_scope
     return payload
 
 

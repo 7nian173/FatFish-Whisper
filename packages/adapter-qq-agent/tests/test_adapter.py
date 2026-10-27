@@ -67,12 +67,18 @@ def test_请求体透传平台消息ID与群号():
     assert payload["group_id"] == "88888"
     assert payload["is_at_bot"] is True
     assert payload["message"] == "在吗"
-    assert payload["debounce"] is False, "Adapter 已做防抖，不应让 Core 再合并"
+    # 防抖归属改判（规格 P0-11）：Core 的 Debouncer 是唯一权威，
+    # Adapter 只声明 debounce=True 让 Core 合并，自己不再开窗口。
+    # 原断言是 `is False`（Adapter 自己防抖），与裁决相反，已更新。
+    assert payload["debounce"] is True, "防抖归属 Core，Adapter 应请求合并"
+    assert payload["chat_scope"] == "g:88888", "群聊分区必须是 g:<群号>"
 
 
 def test_私聊不带group_id():
     event = InboundEvent(platform_message_id="m1", user_id="10001", message="hi")
-    assert "group_id" not in event.to_payload()
+    payload = event.to_payload()
+    assert "group_id" not in payload
+    assert payload["chat_scope"] == "p:10001", "私聊分区必须是 p:<user_id>"
     assert event.target.is_group is False
 
 
