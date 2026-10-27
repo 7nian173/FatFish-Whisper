@@ -22,10 +22,11 @@ def test_三段式顺序与原文完整保留():
     assert output.startswith("[你的深层潜意识]：（测试OS）")
     assert lines[0] == "[你的深层潜意识]：（测试OS）", "第一段必须是潜意识 + 内心 OS"
     assert lines[1] == NOTICE_LINE, "第二段必须是固定提示语"
-    assert lines[2] == "---", "第三行必须是分隔线"
-    assert lines[3] == "[用户消息]"
-    assert "\n".join(lines[4:]) == "在吗\n你好", "用户原文（含换行）必须完整保留"
-    assert len(lines) == 6, "在吗/你好 应各占一行，共 6 行，实际 {0}: {1}".format(
+    assert lines[2].startswith("[现在] "), "第三行是时间块（动态尾部，分钟粒度）"
+    assert lines[3] == "---", "时间块之后才是分隔线"
+    assert lines[4] == "[用户消息]"
+    assert "\n".join(lines[5:]) == "在吗\n你好", "用户原文（含换行）必须完整保留"
+    assert len(lines) == 7, "在吗/你好 应各占一行，共 7 行，实际 {0}: {1}".format(
         len(lines), lines
     )
     assert output.count("---") == 1, "分隔线只应出现一次"
@@ -39,7 +40,7 @@ def test_内心os与用户消息不同行():
     lines = output.splitlines()
 
     os_line = lines[0]
-    message_lines = lines[4:]
+    message_lines = lines[5:]
 
     assert "在吗" not in os_line, "用户消息不得混入潜意识那一行"
     assert "你好" not in os_line

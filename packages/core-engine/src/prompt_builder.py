@@ -18,17 +18,61 @@
 """
 from __future__ import annotations
 
+import datetime
 import random
 from typing import Final, Optional
 
 from sanitize import MAX_MEMORY_BLOCK_CHARS, clean_memory_items
 
-__all__ = ["PromptBuilder", "INNER_OS_TABLE", "NEUTRAL_INNER_OS"]
+__all__ = ["PromptBuilder", "INNER_OS_TABLE", "NEUTRAL_INNER_OS", "time_block"]
 
 # ---------------------------------------------------------------- 常量
 
 #: 内心 OS 最大长度（字符数）
 MAX_INNER_OS_LEN: Final[int] = 40
+
+#: 时段划分：左闭右开。让模型知道"现在是深夜"而不只是"20:03"。
+TIME_PERIODS: Final[tuple[tuple[int, int, str], ...]] = (
+    (0, 5, "深夜"),
+    (5, 8, "清晨"),
+    (8, 11, "上午"),
+    (11, 13, "中午"),
+    (13, 17, "下午"),
+    (17, 19, "傍晚"),
+    (19, 23, "晚上"),
+    (23, 24, "深夜"),
+)
+
+#: 星期名（``datetime.weekday()``：0=周一）
+WEEKDAYS: Final[tuple[str, ...]] = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def time_block(now: Optional[datetime.datetime] = None) -> str:
+    """生成一行"当前时间"动态块。
+
+    **只精确到分钟**：秒级时间会让同一分钟内的两次请求 prompt 不同，
+    白白击穿前缀缓存，而对"现在几点"的判断毫无帮助（死线 D3）。
+
+    Args:
+        now: 注入的当前时间（测试用）；``None`` 用本机时间。
+
+    Returns:
+        形如 ``[现在] 2026-10-26 21:47 周一 · 晚上`` 的单行文本。
+    """
+    moment = now or datetime.datetime.now()
+    hour = moment.hour
+    period = "深夜"
+    for start, end, name in TIME_PERIODS:
+        if start <= hour < end:
+            period = name
+            break
+    weekday = WEEKDAYS[moment.weekday()]
+    return "[现在] {0} {1} {2} · {3}".format(
+        moment.strftime("%Y-%m-%d"),
+        moment.strftime("%H:%M"),
+        weekday,
+        period,
+    )
 
 #: 中性兜底（inner_os 为空时使用）
 NEUTRAL_INNER_OS: Final[str] = "（今天的心情平平稳稳的。）"
@@ -275,6 +319,8 @@ class PromptBuilder:
         crisis: bool = False,
         noise: bool = False,
         override: Optional[str] = None,
+        now: Optional[datetime.datetime] = None,
+        include_time: bool = True,
     ) -> str:
         """把内心 OS、记忆、用户消息按块拼成最终 Prompt。
 
@@ -320,6 +366,10 @@ class PromptBuilder:
             parts.append(NOISE_DIRECTIVE)
         if memory_block:
             parts.append(memory_block)
+        if include_time:
+            # 时间块属于动态尾部：必须在 `---` 与 `[用户消息]` 之前、
+            # 静态人设之后。分钟粒度，秒级变化不得影响前缀（死线 D2/D3）。
+            parts.append(time_block(now))
         parts.append("---")
         parts.append("[用户消息]")
         parts.append(message_text)

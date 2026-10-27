@@ -10,16 +10,20 @@ from __future__ import annotations
 
 from .config import AdapterConfig
 from .core_client import CoreClient, NativeLLM
+from .debounce import DebounceQueue, merge_events
 from .executor import ActionExecutor, ExecutionResult
 from .host import CallbackHost, HostAPI, MockHostAPI
 from .models import Action, CoreReply, InboundEvent, Target
 from .recall import RecallDecision, RecallRoller
+from .sanitize import clean_cq, has_content
 from .service import FatFishAdapter, TurnResult
 
 __all__ = [
     "AdapterConfig",
     "CoreClient",
     "NativeLLM",
+    "DebounceQueue",
+    "merge_events",
     "ActionExecutor",
     "ExecutionResult",
     "CallbackHost",
@@ -31,6 +35,8 @@ __all__ = [
     "Target",
     "RecallDecision",
     "RecallRoller",
+    "clean_cq",
+    "has_content",
     "FatFishAdapter",
     "TurnResult",
 ]

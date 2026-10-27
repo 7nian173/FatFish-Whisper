@@ -26,6 +26,7 @@ from .executor import ActionExecutor, ExecutionResult
 from .host import HostAPI
 from .models import CoreReply, InboundEvent
 from .recall import RecallDecision, RecallRoller
+from .sanitize import clean_cq
 
 logger = logging.getLogger("ffw.adapter")
 
@@ -115,6 +116,11 @@ class FatFishAdapter:
 
     async def on_event(self, event: InboundEvent) -> TurnResult:
         """处理一条宿主消息事件。**永不抛异常**。"""
+        prepared = self._prepare(event)
+        if prepared is None:
+            # 清洗后无可判定内容（纯 @ / 纯表情）：不发消息、不请求 Core、不计 Token
+            return self._skipped(event)
+        event = prepared
         target = event.target
 
         reply = await self.core.ask(event)
@@ -136,6 +142,47 @@ class FatFishAdapter:
             )
 
         return TurnResult(event, reply, execution, decision)
+
+    # ---------------------------------------------------------- 清洗
+
+    def _prepare(self, event: InboundEvent) -> Optional[InboundEvent]:
+        """剥离 CQ 码。清洗后没内容就返回 ``None``（调用方跳过本次判定）。
+
+        为什么在 Adapter 做而不是让宿主做：宿主往往直接把 ``raw_message``
+        透传，而 ``[CQ:at,qq=123]`` 会让 Track A 词典误命中、让 Track B 把
+        ``qq=123`` 当成用户说的话（47 功能点第 1 条 / 裁决 A-10 拆件吸收）。
+        """
+        cleaned = clean_cq(event.message)
+        if not cleaned:
+            logger.info(
+                "清洗后无可判定内容，跳过（id=%s, user=%s）",
+                event.platform_message_id,
+                event.user_id,
+            )
+            return None
+        if cleaned == event.message:
+            return event
+        return InboundEvent(
+            platform_message_id=event.platform_message_id,
+            user_id=event.user_id,
+            message=cleaned,
+            group_id=event.group_id,
+            is_at_bot=event.is_at_bot,
+            self_id=event.self_id,
+        )
+
+    @staticmethod
+    def _skipped(event: InboundEvent) -> TurnResult:
+        """构造「跳过」结果：不发消息、不请求 Core、不计 Token。"""
+        reply = CoreReply(
+            status="skipped",
+            actions=[],
+            inner_os="",
+            recall_hint=None,
+            debug={"reason": "empty_after_sanitize"},
+            raw={"status": "skipped", "reason": "empty_after_sanitize"},
+        )
+        return TurnResult(event, reply, ExecutionResult())
 
     async def on_message(
         self,
