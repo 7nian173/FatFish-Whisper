@@ -41,5 +41,12 @@
 ## 基线
 
 - 仓库：`FatFish-Whisper 0.1` @ `4386e46`（== `origin/main`）
-- 测试：`364 passed in 17.03s`
-- 代码规模：`core-engine/src` 12 模块 5,497 行；`fatfish_adapter` 8 模块 919 行
+- **测试口径（2026-10-27 修正，依据裁决 A-10 第三节）**：
+  - 主干基线 `4386e46` 实跑 **338 passed**
+  - 当前工作树实跑 **core-engine 367 + adapter 53 = 420 passed**
+  - B 线（WorkBuddy `main-77ae86b6`）特有测试已做**模块级吸收**（CQ 清洗 / 防抖队列 / 时间块），未整线合并
+  - 原「364 passed」是 B 线工作树的数字，误记于本基线，已更正
+- 代码规模：`core-engine/src` 13 模块；`fatfish_adapter` 10 模块（含新增 `sanitize.py` / `debounce.py`）
+
+> ⚠️ 两套 pytest **必须分开跑**：`core-engine/src/main.py` 与 `adapter-qq-agent/main.py` 同名，
+> 同进程收集会 ImportError（实测 `13 failed / 8 errors`，是撞名不是真失败）。
