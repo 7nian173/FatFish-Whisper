@@ -209,20 +209,47 @@ STATE_LOCK_POLL: Final[float] = 0.01       # 等锁轮询间隔
 TRACK_B_CACHE_TTL: Final[int] = 3600       # Track B 结果缓存 1 小时
 TRACK_B_FALLBACK: Final[int] = 50          # Track B 熔断兜底值
 
+#: P0-4 防记仇白名单：Track B 判负面时必须给出的「心疼类」理由关键词。
+#:
+#: 为什么需要它：LLM 把「用户骂了我」当成扣分依据时，Bot 会真的记仇——
+#: 这类判定不是共情，而是被冒犯。只有出于心疼 / 担心 / 自己难过 / 自责 /
+#: 抱歉而扣分，才是「因为在意你而低落」。命中不了白名单的负面判定一律驳回。
+REASON_WHITELIST: Final[tuple[str, ...]] = (
+    "心疼",
+    "担心",
+    "自己难过",
+    "自责",
+    "抱歉",
+)
+
+#: Track B 判定的结构化结果：``(score, reason, confidence)``。
+#:
+#: ``reason`` 为 ``None`` 表示 LLM **没有返回 reason 字段**（旧协议 / 测试替身），
+#: 与「返回了空字符串」语义不同——前者无法据此判定是否记仇，按放行处理以保持
+#: 历史行为；后者是明确给了理由但没命中白名单，必须驳回。
+TrackBVerdict = tuple[int, Optional[str], float]
+
 #: 批次 ID 的进程内自增序号（保证同一毫秒内多次冲刷也不撞号）
 _BATCH_SEQ: Final = itertools.count(1)
 
-#: Track B 的 system prompt：强制 JSON Mode，只要一个字段
+#: Track B 的 system prompt：强制 JSON Mode，三个字段缺一不可
 TRACK_B_SYSTEM_PROMPT: Final[str] = (
     "你是情绪判定模块，只输出严格 JSON，不要任何解释文字。\n"
-    '格式：{"emotion_target": 0 到 100 的整数}\n'
+    '格式：{"emotion_target": 0 到 100 的整数, '
+    '"confidence": 0 到 1 的小数, "reason": "一句话中文理由"}\n'
     "含义：0=极度负面/崩溃边缘，50=平静，100=非常愉悦。\n"
     "用户的话里出现了转折词（但是/其实/不过/可是/然而），"
     "往往意味着口是心非或情绪反转，请按他真实的情绪给分，而不是按字面。\n"
     "如果这句话本身没有明确情绪（闲聊、陈述事实、问问题），请给 50 附近的分，"
     "不要因为语气礼貌就判为开心。\n"
     "若提供了「当前关系状态」，请结合它判断：同样的语气，对不同好感度的人"
-    "应有不同解读（对亲近的人可以是撒娇，对疏离的人可能是客套）。"
+    "应有不同解读（对亲近的人可以是撒娇，对疏离的人可能是客套）。\n"
+    "reason 必须是一句简短中文，说明你为什么给这个分。\n"
+    "重要：如果你要给出低于 50 的负面分，reason 里必须写清楚你是"
+    "「因为心疼对方 / 担心对方 / 自己难过 / 自责 / 抱歉」才低落；"
+    "绝不能因为觉得用户冒犯了你、骂了你、不尊重你而扣分——"
+    "那种理由会被系统驳回，并强制回到 50。\n"
+    "confidence 表示你对这个判断的把握程度，0 完全没把握，1 非常确定。"
 )
 
 #: 回复模板（按等级）
@@ -598,18 +625,63 @@ class TrackB:
         Returns:
             0-100 的整数；任何异常 / 未配置 / 解析失败都返回 50。
         """
+        verdict = await self.evaluate_verdict(
+            message, context, user_id=user_id, relationship=relationship
+        )
+        return verdict[0]
+
+    async def evaluate_verdict(
+        self, message: str, context: Optional[list[Any]] = None, user_id: str = "",
+        relationship: Optional[dict[str, Any]] = None,
+    ) -> TrackBVerdict:
+        """同 :meth:`evaluate`，但额外返回 LLM 给出的 ``reason`` 与 ``confidence``。
+
+        为什么需要它：P0-4 防记仇要在**引擎层**判断「这次扣分到底是共情还是被
+        冒犯」，判断依据是 LLM 自己写的理由，因此理由必须能带回调用方。分数语义
+        与 :meth:`evaluate` 完全一致（同样永不抛异常、同样兜底 50）。
+
+        Returns:
+            ``(score, reason, confidence)``；异常 / 未配置 / 解析失败时
+            ``reason`` 为 ``None``、``confidence`` 为 0.0。
+        """
         try:
+            override = self._evaluate_override()
+            if override is not None:
+                # 兼容旧接缝：``evaluate`` 是 TrackB 的公开入口，外部（子类、测试
+                # 替身、运维热补丁）覆盖它就是在接管判分。此时分数归覆盖者所有，
+                # 且拿不到结构化理由——``reason`` 记 ``None``（无可审计理由，
+                # 白名单按放行处理），而不是绕过覆盖者去跑内建链路。
+                score = await override(
+                    message, context, user_id=user_id, relationship=relationship
+                )
+                return (int(score), None, 0.0)
             return await self._evaluate_inner(message, context, user_id, relationship)
         except Exception:  # 最后一道防线：Track B 永不让主流程挂掉
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
+
+    def _evaluate_override(self) -> Optional[Any]:
+        """外部覆盖了 ``evaluate`` 就返回它，否则返回 ``None``。
+
+        两处都要查：实例属性（测试替身 ``setattr(obj, "evaluate", fn)``）与
+        类属性（子类重写）。只查实例属性会漏掉子类，那样子类的判分会被内建
+        链路顶掉——这是比测试失败更严重的静默错误。
+        """
+        own = vars(self).get("evaluate")
+        if own is not None:
+            return own
+        class_level = type(self).__dict__.get("evaluate")
+        if class_level is not None and class_level is not TrackB.evaluate:
+            # 类属性拿到的是普通函数，需要自己绑定 self
+            return class_level.__get__(self, type(self))
+        return None
 
     async def _evaluate_inner(
         self, message: str, context: Optional[list[Any]], user_id: str,
         relationship: Optional[dict[str, Any]] = None,
-    ) -> int:
+    ) -> TrackBVerdict:
         """Track B 的实际判定流程（异常由 ``evaluate`` 统一兜底）。"""
         if not self.enabled:
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
 
         text = "" if message is None else str(message)
         context_text = self._format_context(context)
@@ -619,7 +691,20 @@ class TrackB:
 
         cached = self.cache.get(cache_key)
         if isinstance(cached, int) and not isinstance(cached, bool):
-            return int(clamp(cached, SCORE_MIN, SCORE_MAX))
+            # 旧版缓存只存分数：reason 未知按 None 处理
+            return (int(clamp(cached, SCORE_MIN, SCORE_MAX)), None, 0.0)
+        if isinstance(cached, dict) and "score" in cached:
+            try:
+                cached_score = int(clamp(float(cached.get("score")), SCORE_MIN, SCORE_MAX))
+            except (TypeError, ValueError):
+                cached_score = TRACK_B_FALLBACK
+            raw_reason = cached.get("reason")
+            cached_reason: Optional[str] = None if raw_reason is None else str(raw_reason)
+            try:
+                cached_conf = clamp(float(cached.get("confidence") or 0.0), 0.0, 1.0)
+            except (TypeError, ValueError):
+                cached_conf = 0.0
+            return (cached_score, cached_reason, cached_conf)
 
         user_prompt = (
             "用户刚才说：" + text + "\n"
@@ -644,30 +729,41 @@ class TrackB:
 
         data = await self._request(body, headers)
         if data is None:
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
 
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
 
         parsed = self._parse_json(content)
         if parsed is None or "emotion_target" not in parsed:
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
 
         raw_value = parsed.get("emotion_target")
         try:
             number = float(raw_value)
         except (TypeError, ValueError):
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
         if isinstance(raw_value, bool) or not math.isfinite(number):
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
 
         score = int(round(clamp(number, SCORE_MIN, SCORE_MAX)))
+        # reason：缺失 -> None（无法判记仇，保持旧行为放行）；有值 -> 原文
+        raw_reason = parsed.get("reason")
+        reason: Optional[str] = None if raw_reason is None else str(raw_reason)
+        # confidence：缺失 / 非数值 -> 0.0，越界 clamp 到 [0, 1]
+        raw_conf = parsed.get("confidence")
+        try:
+            confidence = clamp(float(raw_conf), 0.0, 1.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if isinstance(raw_conf, bool) or not math.isfinite(confidence):
+            confidence = 0.0
 
-        self._remember(cache_key, score)
+        self._remember(cache_key, score, reason, confidence)
         self._log_tokens(user_id, data.get("usage") or {})
-        return score
+        return (score, reason, confidence)
 
     # ---------------------------------------------------------- 内部
 
@@ -725,10 +821,24 @@ class TrackB:
             )
         )
 
-    def _remember(self, cache_key: str, score: int) -> None:
-        """写缓存（失败不影响返回）。"""
+    def _remember(
+        self,
+        cache_key: str,
+        score: int,
+        reason: Optional[str] = None,
+        confidence: float = 0.0,
+    ) -> None:
+        """写缓存（失败不影响返回）。
+
+        存 dict 而非裸分数：P0-4 的记仇判定要读回 reason，缓存命中时若丢掉理由，
+        同一句话第二次出现就会被当成「无理由」直接放行，白名单形同虚设。
+        """
         try:
-            self.cache.set(cache_key, int(score), expire=TRACK_B_CACHE_TTL)
+            self.cache.set(
+                cache_key,
+                {"score": int(score), "reason": reason, "confidence": float(confidence)},
+                expire=TRACK_B_CACHE_TTL,
+            )
         except Exception:
             pass
 
@@ -983,7 +1093,7 @@ class EmotionEngine:
         # 防抖合并批内多个等待者会并发走 process()，它们共享同一 event_key，但各自的
         # 关系快照/记忆上下文可能已读到彼此刚落库的结果 → Track B 缓存键不同 → 缓存
         # 只能兜住串行、兜不住并发 → 一次合并打多次 LLM（token 双倍）。
-        self._track_b_inflight: dict[str, "asyncio.Future[int]"] = {}
+        self._track_b_inflight: dict[str, "asyncio.Future[TrackBVerdict]"] = {}
         # 性格向量：只读本地缓存，不触网（见 persona_traits.py）
         self.traits: PersonaTraits = load_traits()
         # 潜意识审核：规则拦截 → 连续刺激 → 概率解禁
@@ -1076,12 +1186,25 @@ class EmotionEngine:
         relationship: Optional[dict[str, Any]] = None,
     ) -> int:
         """LLM 复核（语义冲突或无明确信号时调用），永不抛异常。"""
+        verdict = await self.evaluate_track_b_verdict(
+            message, context, user_id=user_id, relationship=relationship
+        )
+        return verdict[0]
+
+    async def evaluate_track_b_verdict(
+        self, message: str, context: Optional[list[Any]] = None, user_id: str = "",
+        relationship: Optional[dict[str, Any]] = None,
+    ) -> TrackBVerdict:
+        """同 :meth:`evaluate_track_b`，但把 ``reason`` / ``confidence`` 一并带回。
+
+        P0-4 防记仇的判定依据是 LLM 写的理由，引擎层必须拿到它。
+        """
         try:
-            return await self.track_b.evaluate(
+            return await self.track_b.evaluate_verdict(
                 message, context, user_id=user_id, relationship=relationship
             )
         except Exception:  # 双重保险：TrackB 内部已兜底
-            return TRACK_B_FALLBACK
+            return (TRACK_B_FALLBACK, None, 0.0)
 
     # ---------------------------------------------------------- 状态读写（同步，走 to_thread）
 
@@ -1807,7 +1930,7 @@ class EmotionEngine:
         *,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
         with_relationship: bool = False,
-    ) -> int:
+    ) -> TrackBVerdict:
         """同一 event_key 的并发 Track B 评估只打一次 LLM（批次单飞）。
 
         为什么需要它：防抖合并批内的多个等待者共享同一个 event_key，但会**并发**
@@ -1837,10 +1960,10 @@ class EmotionEngine:
         if pending is not None:
             return await asyncio.shield(pending)
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[int] = loop.create_future()
+        future: "asyncio.Future[TrackBVerdict]" = loop.create_future()
         self._track_b_inflight[key] = future
         try:
-            score = await self._evaluate_track_b_locked(
+            verdict = await self._evaluate_track_b_locked(
                 text,
                 memories,
                 user_id,
@@ -1854,8 +1977,8 @@ class EmotionEngine:
             raise
         else:
             if not future.done():
-                future.set_result(score)
-            return score
+                future.set_result(verdict)
+            return verdict
         finally:
             self._track_b_inflight.pop(key, None)
 
@@ -1867,7 +1990,7 @@ class EmotionEngine:
         *,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
         with_relationship: bool = False,
-    ) -> int:
+    ) -> TrackBVerdict:
         """真正打一次 Track B；``with_relationship`` 时先读关系快照（仅领头者）。"""
         relationship: Optional[dict[str, Any]] = None
         if with_relationship:
@@ -1877,9 +2000,41 @@ class EmotionEngine:
                 "emotion": snapshot["emotion"],
                 "level": snapshot["level"],
             }
-        return await self.evaluate_track_b(
+        return await self.evaluate_track_b_verdict(
             text, memories, user_id=user_id, relationship=relationship
         )
+
+    @staticmethod
+    def _apply_reason_whitelist(target: int, track_b_reason: Optional[str]) -> int:
+        """P0-4 防记仇闸门：负面扣分必须出自白名单理由，否则驳回回中性分。
+
+        判定表：
+
+        ==================  ====================  ==========================
+        target               track_b_reason        结果
+        ==================  ====================  ==========================
+        >= 50               任意                 原样返回（不拦正向/中性）
+        < 50                ``None``             原样返回（LLM 未给理由，保持旧行为）
+        < 50                命中 REASON_WHITELIST 原样返回（是心疼，不是记仇）
+        < 50                未命中 / 空串        驳回 -> ``NEUTRAL_TARGET``（50）
+        ==================  ====================  ==========================
+
+        ``None`` 与空串的区别是有意的：``None`` 只可能来自「模型没按三字段协议
+        返回」或旧测试替身，此时没有任何理由可审，判记仇没有依据；空串则是模型
+        明确写了 reason 但内容空，属于没通过审计，必须驳回。
+        """
+        if target >= NEUTRAL_TARGET:
+            return target
+        if track_b_reason is None:
+            return target
+        if any(word in track_b_reason for word in REASON_WHITELIST):
+            return target
+        logger.warning(
+            "[WARN] Emotion drop rejected by reason whitelist: target=%s reason=%r",
+            target,
+            track_b_reason,
+        )
+        return NEUTRAL_TARGET
 
     async def process(
         self,
@@ -1911,6 +2066,10 @@ class EmotionEngine:
         track = "A"
         confidence = float(track_a.get("confidence", 0.5) or 0.5)
         reason = str(track_a.get("reason", "无明显信号"))
+        # P0-4：只有真走了 Track B 才有理由/置信度；快速路径保持 None/0.0，
+        # 否则 debug 回显与白名单判定会引用到未绑定名字。
+        track_b_reason: Optional[str] = None
+        track_b_confidence: float = 0.0
 
         # ---------- 2. Track B（语义冲突 / 无明确信号时） ----------
         # 低置信度且没有任何命中词 = 这句话的情绪是「未定义」的。
@@ -1931,9 +2090,10 @@ class EmotionEngine:
             undefined = False
         elif track_a.get("semantic_conflict"):
             if self.track_b.enabled:
-                target = await self._track_b_once(
+                target, track_b_reason, track_b_confidence = await self._track_b_once(
                     event_key, text, memories, user_id, chat_scope=scope
                 )
+                target = self._apply_reason_whitelist(target, track_b_reason)
                 path = "deep"
                 track = "B"
                 confidence = 0.9
@@ -1948,7 +2108,7 @@ class EmotionEngine:
             if self.track_b.enabled:
                 # 关系快照由 _track_b_once 的领头者路径读取（跟随者直接搭车），
                 # 关系详情进 Track B 提示词，reason 不再重复引用快照
-                target = await self._track_b_once(
+                target, track_b_reason, track_b_confidence = await self._track_b_once(
                     event_key,
                     text,
                     memories,
@@ -1956,6 +2116,7 @@ class EmotionEngine:
                     chat_scope=scope,
                     with_relationship=True,
                 )
+                target = self._apply_reason_whitelist(target, track_b_reason)
                 path = "deep"
                 track = "B"
                 confidence = 0.9
@@ -2069,6 +2230,10 @@ class EmotionEngine:
                 "reason": reason,
                 "confidence": round(confidence, 2),
                 "target": int(target),
+                # P0-4：Track A 的 reason/confidence 与 Track B 的分开回显，
+                # 否则前端只能看到引擎自己的路由说明，看不到模型为何扣分。
+                "track_b_reason": track_b_reason,
+                "track_b_confidence": round(track_b_confidence, 2),
                 # 情绪是否「未定义」：Track A 无命中或正负打平。此时 target 由 LLM 或中性值给出。
                 "undefined": bool(undefined),
                 # 六段语气带（crisis/deep_low/low/stable/up/high）与本次平滑系数
