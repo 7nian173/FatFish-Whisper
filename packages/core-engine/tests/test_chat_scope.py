@@ -395,6 +395,45 @@ def test_同人跨群同文本不算重复(engine_factory, monkeypatch):
     assert again.json()["status"] == "duplicate", "同分区重复推送仍要判重"
 
 
+def test_接口层乱序响应回显实际水位线(engine_factory, monkeypatch):
+    """旧消息被丢弃时，顶层 arrival_ts 必须仍是库里的新水位线。"""
+    import httpx
+
+    from main import app
+
+    engine = engine_factory({})
+    monkeypatch.setattr(app.state, "engine", engine, raising=False)
+
+    def post(payload):
+        async def go():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://core"
+            ) as http:
+                return await http.post("/api/v1/chat", json=payload)
+
+        return _run(go())
+
+    fresh = post({
+        "user_id": "u-order-api",
+        "message": "今天真的很开心，谢谢你陪我",
+        "group_id": "777",
+        "platform_message_id": "order-new",
+        "timestamp": 2000,
+    })
+    stale = post({
+        "user_id": "u-order-api",
+        "message": "今天好累啊",
+        "group_id": "777",
+        "platform_message_id": "order-old",
+        "timestamp": 1000,
+    })
+
+    assert fresh.json()["debug"]["applied"] is True
+    assert stale.json()["debug"]["applied"] is False
+    assert stale.json()["debug"]["arrival_ts"] == 2000
+    assert stale.json()["arrival_ts"] == 2000
+
+
 # ---------------------------------------------------------------- 7. 老库迁移
 
 
@@ -470,3 +509,92 @@ def test_新库迁移是空操作(engine_factory):
     assert engine.migrations == [] or all(
         "user_states" not in item for item in engine.migrations
     ), "新建库不需要重建 user_states，实际 {0}".format(engine.migrations)
+
+
+# ------------------------------------------------- 8. P0-8 提前返回分支水位线
+
+
+def _p08_post(app, payload):
+    """在 ASGI 层打一次 /api/v1/chat，返回解析后的 JSON。"""
+    import httpx
+
+    async def go():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://core"
+        ) as http:
+            response = await http.post("/api/v1/chat", json=payload)
+            return response.json()
+
+    return _run(go())
+
+
+def test_noise分支不推进水位线(engine_factory, monkeypatch):
+    """noise 分支在写库之前就返回，旧 timestamp 不得把台账往前推。
+
+    场景：先发一条正常消息把水位线推到 2000，再发一条噪音文本「6」并带旧
+    timestamp 1000。noise 分支不更新情绪（applied=False），因此：
+    - debug.applied 必须是 False（走的是 noise 短路，不是乱序拦截）；
+    - debug.arrival_ts 与顶层 arrival_ts 都必须仍是 2000（库中实际水位线），
+      绝不能回显本次的 1000。
+    """
+    from main import app
+
+    engine = engine_factory({})
+    monkeypatch.setattr(app.state, "engine", engine, raising=False)
+
+    fresh = _p08_post(app, {
+        "user_id": "u-noise-order",
+        "message": "今天真的很开心，谢谢你陪我",
+        "platform_message_id": "noise-fresh",
+        "timestamp": 2000,
+    })
+    assert fresh["debug"]["applied"] is True, "前置：新消息必须生效"
+    assert fresh["arrival_ts"] == 2000
+
+    noise = _p08_post(app, {
+        "user_id": "u-noise-order",
+        "message": "6",
+        "platform_message_id": "noise-stale",
+        "timestamp": 1000,
+    })
+
+    assert noise["debug"]["path"] == "noise", "「6」必须被判为 noise 短路"
+    assert noise["debug"]["applied"] is False, "noise 分支不更新情绪"
+    assert noise["debug"]["arrival_ts"] == 2000, "debug 水位线不得被旧 timestamp 推进"
+    assert noise["arrival_ts"] == 2000, "顶层台账必须是库中实际水位线，不是 1000"
+    assert noise["debug"]["request_ts"] == 1000, "本次请求时间戳只作留痕"
+
+
+def test_白名单分支不推进水位线(engine_factory, monkeypatch):
+    """特权放行分支同样不写库，旧 timestamp 不得推进水位线。
+
+    ``PRIVILEGED_USERS`` 在判定前短路：不扣分、不写状态。因此它既不推进水位线，
+    也不该把本次旧 timestamp 当成台账回显。
+    """
+    from main import app
+
+    engine = engine_factory({"PRIVILEGED_USERS": "u-vip-order"})
+    monkeypatch.setattr(app.state, "engine", engine, raising=False)
+
+    # 水位线是按 (user_id, chat_scope) 分房的：HTTP 入口会把私聊派生为
+    # "p:<user_id>"，所以预置历史状态必须落在同一个分区，否则读到的是另一行。
+    import asyncio as _asyncio
+
+    _asyncio.run(
+        engine.update_emotion(
+            "u-vip-order", 60, chat_scope="p:u-vip-order", request_ts=2000
+        )
+    )
+
+    vip = _p08_post(app, {
+        "user_id": "u-vip-order",
+        "message": "随便聊两句天气",
+        "platform_message_id": "vip-stale",
+        "timestamp": 1000,
+    })
+
+    assert vip["debug"]["path"] == "whitelist", "特权用户必须走白名单短路"
+    assert vip["debug"]["applied"] is False
+    assert vip["debug"]["arrival_ts"] == 2000, "白名单分支不得推进水位线"
+    assert vip["arrival_ts"] == 2000, "顶层台账不得回显旧 timestamp 1000"
+    assert vip["debug"]["request_ts"] == 1000

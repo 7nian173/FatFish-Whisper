@@ -105,11 +105,15 @@ def test_models_表结构():
         "emotion_level",
         "last_update",
         "last_event_key",
-    }, "UserState 必须是 (user_id, chat_scope) 复合主键 + 4 个状态字段"
+        "arrival_ts",
+    }, "UserState 必须是 (user_id, chat_scope) 复合主键 + 乱序水位线与状态字段"
 
     table = models_module.UserState.__table__
     assert table.c.emotion_current.default.arg == 50
     assert table.c.emotion_level.default.arg == "L0"
+    assert table.c.arrival_ts.default.arg == 0
+    assert table.c.arrival_ts.server_default.arg.text == "0"
+    assert table.c.arrival_ts.nullable is False
     assert list(table.primary_key.columns.keys()) == ["user_id", "chat_scope"], (
         "UserState 必须是复合主键，否则同一个人在不同群无法分房"
     )

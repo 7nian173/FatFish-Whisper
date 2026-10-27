@@ -14,6 +14,7 @@ import datetime
 import os
 import re
 import sys
+import time
 
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 CORE_DIR = os.path.dirname(SRC_DIR)
@@ -164,6 +165,12 @@ class ChatRequest(BaseModel):
     event_key: Optional[str] = Field(
         default=None,
         description="幂等键。不传时：有 platform_message_id 就用它，否则按批次自动生成",
+    )
+    timestamp: Optional[int] = Field(
+        default=None,
+        description="消息在**宿主侧**产生的时刻（整型毫秒 Unix 时间戳，P0-8 乱序防御）。"
+        "不传则由 Core 用当前时间兜底；传了就参与乱序比对——比库里的 arrival_ts 旧的消息"
+        "会被丢弃，绝不会覆盖更新的状态。",
     )
 
 
@@ -402,6 +409,13 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     # 第二条会被当成幽灵消息直接吞掉（跨群串味的另一种形态）。
     chat_scope = derive_chat_scope(req.user_id, req.group_id, req.chat_scope)
 
+    # ---- P0-8 乱序防御：提取本次请求的到达时间戳（整型毫秒）----
+    # 宿主没传就用 Core 侧当前时间兜底：至少保证「同时刻到达的顺序」不被倒置，
+    # 也不会因为缺字段而让整条链路拒绝服务。NaN/负数是非法的 epoch 毫秒，按缺失处理。
+    request_ts = int(req.timestamp) if req.timestamp is not None and int(req.timestamp) > 0 else None
+    if request_ts is None:
+        request_ts = int(time.time() * 1000)
+
     # ---- 入口判重（幽灵消息）：有平台 message_id 就按 id 判，没有退化为文本短窗口 ----
     if engine.ingress_deduper.is_duplicate(
         req.user_id, req.message, req.platform_message_id, chat_scope
@@ -430,6 +444,7 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
             debounce=req.debounce,
             event_key=event_key,
             chat_scope=chat_scope,
+            request_ts=request_ts,
         )
     except Exception as exc:  # 兜底：绝不让情绪机把宿主 Bot 拖挂
         raise HTTPException(status_code=500, detail="判定失败: " + str(exc))
@@ -438,6 +453,14 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     payload["duplicate"] = False
     payload["platform_message_id"] = req.platform_message_id
     payload["chat_scope"] = chat_scope
+    # 业务层返回的是库中**实际**水位线；旧消息被丢弃时不能回显本次旧 timestamp。
+    # 注意不能写成 `... or request_ts`：水位线真为 0（老行、尚未应用任何带时间戳
+    # 的请求）时它是合法值，用 falsy 兜底会把本次 timestamp 冒充成台账。
+    debug = payload.get("debug") or {}
+    if "arrival_ts" in debug:
+        payload["arrival_ts"] = int(debug.get("arrival_ts") or 0)
+    else:
+        payload["arrival_ts"] = request_ts
     return payload
 
 

@@ -95,6 +95,11 @@ class UserState(Base):
         emotion_level: 稳定等级，L0 / L1 / L2 / CRISIS。
         last_update: 最近一次写入时间（UTC naive），用于半衰期衰减。
         last_event_key: 最近一次生效的 event_key（幂等去重用）。
+        arrival_ts: 最近一次**生效请求**的到达时间戳（整型毫秒，Unix epoch）。
+            用于 P0-8 乱序消息防御：网络抖动会让 T1 发出的旧消息在 T2 之后才到达，
+            若直接覆盖状态就会用「过去的情绪」盖掉「现在的情绪」。整型毫秒而非
+            ``datetime``：跨进程/跨语言比较无歧义，SQLite 存整数也最省。
+            默认 ``0`` 表示「从未应用过任何带时间戳的请求」（老库补齐即此值）。
 
     Note:
         **好感度不在这里**。``affinity_raw`` 曾经是本表的一列，改成复合主键后
@@ -120,6 +125,12 @@ class UserState(Base):
     last_event_key: Mapped[Optional[str]] = mapped_column(
         String, nullable=True, default=None
     )
+    #: 乱序消息防御（P0-8）：最近一次生效请求的到达时间戳（整型毫秒）。
+    #: 老库由 :func:`ensure_schema` 补列，默认 0；0 恒小于任何真实毫秒时间戳，
+    #: 因此「老行第一次收到新消息」不会被误判为乱序。
+    arrival_ts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
 
     def as_dict(self) -> dict[str, Any]:
         """转成纯字典（方便调试 / 日志，不参与业务逻辑）。"""
@@ -130,6 +141,7 @@ class UserState(Base):
             "emotion_level": self.emotion_level,
             "last_update": self.last_update,
             "last_event_key": self.last_event_key,
+            "arrival_ts": int(self.arrival_ts or 0),
         }
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
@@ -300,10 +312,13 @@ def ensure_schema(bind: Engine) -> list[str]:
         for column in table.columns:
             if column.name in columns:
                 continue
-            # 只补可空列：SQLite 的 ADD COLUMN 无法安全加 NOT NULL 无默认列
+            # 只补可空列：SQLite 的 ADD COLUMN 无法安全加 NOT NULL 无默认列。
+            # 例外：声明了整型默认值的非空列（P0-8 的 arrival_ts）可以带 DEFAULT 补，
+            # 老行自动取默认值 0，不会破坏既有数据。
             col_type = column.type.compile(dialect=bind.dialect)
-            ddl = "ALTER TABLE {0} ADD COLUMN {1} {2}".format(
-                table.name, column.name, col_type
+            default = _column_add_column_default(column)
+            ddl = "ALTER TABLE {0} ADD COLUMN {1} {2}{3}".format(
+                table.name, column.name, col_type, default
             )
             try:
                 with bind.begin() as conn:
@@ -315,7 +330,34 @@ def ensure_schema(bind: Engine) -> list[str]:
     return applied
 
 
+#: 允许在 ``ADD COLUMN`` 时带 ``DEFAULT`` 的整型列白名单。
+#:
+#: 只放「补默认值语义安全」的列：老行拿到 0 表示「从未记录」，与业务无歧义。
+#: 不要往里加业务状态列——给历史行凭空造一个状态值是更严重的错误。
+_INT_DEFAULTED_ADD_COLUMNS: Final[frozenset[str]] = frozenset({"arrival_ts"})
+
+
+def _column_add_column_default(column: Any) -> str:
+    """生成 ``ADD COLUMN`` 尾部默认值片段（仅白名单整型列，否则空串）。
+
+    Args:
+        column: SQLAlchemy ``Column``。
+
+    Returns:
+        ``" NOT NULL DEFAULT 0"`` 这类片段；不需要默认值时返回 ``""``。
+    """
+    if column.name not in _INT_DEFAULTED_ADD_COLUMNS:
+        return ""
+    if not isinstance(column.type, Integer):
+        return ""
+    return " NOT NULL DEFAULT 0"
+
+
 #: 重建后的 ``user_states`` 结构（SQLite 专用：改主键只能重建表）。
+#:
+#: 注意：这里是**手写 DDL**，不会跟随 :class:`UserState` 的字段自动变。
+#: 给 ``user_states`` 加列时必须同步改这里，否则老库重建一次就把新列丢掉
+#: （P0-8 的 ``arrival_ts`` 就踩过这个坑）。
 _USER_STATES_NEW_DDL: Final[str] = (
     "CREATE TABLE user_states__new ("
     " user_id VARCHAR NOT NULL,"
@@ -324,6 +366,7 @@ _USER_STATES_NEW_DDL: Final[str] = (
     " emotion_level VARCHAR NOT NULL DEFAULT 'L0',"
     " last_update DATETIME NOT NULL,"
     " last_event_key VARCHAR,"
+    " arrival_ts INTEGER NOT NULL DEFAULT 0,"
     " PRIMARY KEY (user_id, chat_scope))"
 )
 
@@ -393,12 +436,16 @@ def migrate_chat_scope(bind: Engine) -> list[str]:
         if "last_update" in columns
         else "CURRENT_TIMESTAMP"
     )
+    # 老库没有 arrival_ts 时补 0（= 从未应用过带时间戳的请求），不是补当前时间：
+    # 补当前时间会让「老行第一次收到新消息」被误判成乱序。
+    select_arrival_ts = "COALESCE(arrival_ts, 0)" if "arrival_ts" in columns else "0"
     copy_rows = (
         "INSERT INTO user_states__new"
-        " (user_id, chat_scope, emotion_current, emotion_level, last_update, last_event_key)"
+        " (user_id, chat_scope, emotion_current, emotion_level, last_update,"
+        " last_event_key, arrival_ts)"
         " SELECT user_id, {0}, COALESCE(emotion_current, 50),"
-        " COALESCE(emotion_level, 'L0'), {1}, {2} FROM user_states".format(
-            select_scope, select_last_update, select_event_key
+        " COALESCE(emotion_level, 'L0'), {1}, {2}, {3} FROM user_states".format(
+            select_scope, select_last_update, select_event_key, select_arrival_ts
         )
     )
     steps = [

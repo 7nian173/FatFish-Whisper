@@ -1122,6 +1122,7 @@ class EmotionEngine:
                             "affinity": affinity,
                             "last_update": None,
                             "last_event_key": None,
+                            "arrival_ts": 0,
                         }
             return {
                 "user_id": user_id,
@@ -1131,6 +1132,7 @@ class EmotionEngine:
                 "affinity": affinity,
                 "last_update": row.last_update,
                 "last_event_key": getattr(row, "last_event_key", None),
+                "arrival_ts": int(getattr(row, "arrival_ts", 0) or 0),
             }
 
     def _write_emotion(
@@ -1141,10 +1143,15 @@ class EmotionEngine:
         moment: Any = None,
         event_key: Optional[str] = None,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
+        arrival_ts: Optional[int] = None,
     ) -> None:
         """写回**本会话分区**的情绪值、等级与 last_event_key。
 
         好感度不在这张表里（全局 ``user_affinity``），因此这里既不会写也不会覆盖它。
+
+        ``arrival_ts``：P0-8 乱序防御的时间水位线。只有确实应用了本次请求才推进；
+        ``None`` 表示调用方没带时间戳，保持库里原值不动（不要用 0 覆盖，否则
+        下一次带时间戳的消息会失去比对基准）。
         """
         scope = str(chat_scope)
         with self.Session() as session:
@@ -1157,6 +1164,7 @@ class EmotionEngine:
                     emotion_level=level,
                     last_update=moment or utcnow(),
                     last_event_key=event_key,
+                    arrival_ts=int(arrival_ts or 0),
                 )
                 session.add(row)
             else:
@@ -1165,6 +1173,8 @@ class EmotionEngine:
                 row.last_update = moment or utcnow()
                 if event_key:
                     row.last_event_key = str(event_key)
+                if arrival_ts is not None:
+                    row.arrival_ts = int(arrival_ts)
             session.commit()
 
     def bump_activity(self, user_id: str, day: Optional[str] = None) -> None:
@@ -1384,6 +1394,7 @@ class EmotionEngine:
         event_key: Optional[str] = None,
         risk: bool = False,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
+        request_ts: Optional[int] = None,
     ) -> dict[str, Any]:
         """衰减 + 平滑 + 落库，返回本次更新的完整快照。
 
@@ -1395,6 +1406,10 @@ class EmotionEngine:
             risk: 是否命中安全风险（命中则等级直接 CRISIS）。
             chat_scope: 会话分区（``g:<群号>`` / ``p:<QQ号>``）。情绪按它分房，
                 好感度不受它影响（全局锚点）。
+            request_ts: 本次请求的到达时间戳（整型毫秒，P0-8）。用于乱序防御：
+                比库里 ``arrival_ts`` 更旧的消息直接丢弃（``applied=False``），
+                绝不覆盖更新的状态。``None`` 时跳过比对并沿用库里旧值——
+                这样内部调用/老测试不带时间戳也不会互相打架。
 
         Returns:
             dict，至少包含 ``user_id`` / ``emotion_prev`` / ``emotion_current`` /
@@ -1421,6 +1436,33 @@ class EmotionEngine:
 
         try:
             snapshot = await asyncio.to_thread(self._get_or_create, user_id, chat_scope)
+
+            # ---- 乱序防御（P0-8）：拿到锁之后、写状态之前先比时间戳 ----
+            # 必须在锁内做：否则两条并发请求会同时通过比对，后写的反而更旧。
+            current_ts = int(snapshot.get("arrival_ts") or 0)
+            if request_ts is not None:
+                incoming = int(request_ts)
+                if incoming < current_ts:
+                    logger.warning(
+                        "[WARN] Out-of-order message dropped: user=%s scope=%s"
+                        " request_ts=%s < arrival_ts=%s",
+                        user_id,
+                        chat_scope,
+                        incoming,
+                        current_ts,
+                    )
+                    return self._build_result(
+                        user_id=user_id,
+                        snapshot=snapshot,
+                        base_prev=float(snapshot["emotion"]),
+                        emotion=int(snapshot["emotion"]),
+                        level=snapshot["level"],
+                        delta=0.0,
+                        decayed=False,
+                        applied=False,
+                        target=target,
+                        last_update=snapshot["last_update"],
+                    )
 
             # ---- 幂等：与上一次生效的 event_key 相同 -> 原样返回，绝不扣分 ----
             if event_key and snapshot.get("last_event_key") == str(event_key):
@@ -1462,7 +1504,14 @@ class EmotionEngine:
 
             moment = utcnow()
             await asyncio.to_thread(
-                self._write_emotion, user_id, emotion, level, moment, event_key, chat_scope
+                self._write_emotion,
+                user_id,
+                emotion,
+                level,
+                moment,
+                event_key,
+                chat_scope,
+                request_ts,
             )
 
             return self._build_result(
@@ -1479,6 +1528,7 @@ class EmotionEngine:
                 stored_prev=stored_prev,
                 alpha=alpha,
                 habit_count=habit_count,
+                arrival_ts=int(request_ts) if request_ts is not None else current_ts,
             )
         finally:
             self._release_state_lock(user_id, chat_scope)
@@ -1498,11 +1548,18 @@ class EmotionEngine:
         stored_prev: Optional[int] = None,
         alpha: float = SMOOTHING_FACTOR,
         habit_count: int = 0,
+        arrival_ts: Optional[int] = None,
     ) -> dict[str, Any]:
-        """统一拼装 update_emotion 的返回结构。"""
+        """统一拼装 update_emotion 的返回结构。
+
+        ``arrival_ts`` 是本分区当前的时间水位线（P0-8）：调用方据此判断
+        「这条消息有没有被乱序丢弃」。未显式传入时回落 ``snapshot``。
+        """
         moment = last_update
         if hasattr(moment, "isoformat"):
             moment = moment.isoformat()
+        if arrival_ts is None:
+            arrival_ts = int(snapshot.get("arrival_ts") or 0)
         return {
             "user_id": user_id,
             "emotion_prev": round(float(base_prev), 2),
@@ -1522,6 +1579,7 @@ class EmotionEngine:
             "applied": bool(applied),
             "target": int(target),
             "last_update": moment,
+            "arrival_ts": int(arrival_ts or 0),
         }
 
     # ---------------------------------------------------------- Bot 自身情绪
@@ -1610,6 +1668,7 @@ class EmotionEngine:
         debounce: bool = False,
         event_key: Optional[str] = None,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
+        request_ts: Optional[int] = None,
     ) -> dict[str, Any]:
         """对外主入口：兼容阶段一签名与返回结构。
 
@@ -1624,6 +1683,8 @@ class EmotionEngine:
             chat_scope: 会话分区（``g:<群号>`` / ``p:<QQ号>``）。由入口
                 （``main.py`` 的请求解析处）**唯一一次**派生后一路透传，
                 下游模块禁止自拼。默认空串只用于兼容老库/老调用方。
+            request_ts: 本次请求的到达时间戳（整型毫秒，P0-8 乱序防御）。
+                透传给 :meth:`update_emotion` 做比对；``None`` 时跳过比对。
 
         Note:
             引擎**不会**按文本内容去重 —— 用户真心连发两次同一句话，就该算两次。
@@ -1635,7 +1696,9 @@ class EmotionEngine:
         # 安全优先于特权：命中硬拦截词的特权用户仍走完整链路——
         # 危机处置不能被一份配置名单绕过（自审结论：否则特权用户求救也得不到 CRISIS 照顾）
         if user_id in self.privileged and not self.auditor.check_rules(text):
-            return await self._whitelisted_payload(user_id, text, event_key, scope)
+            return await self._whitelisted_payload(
+                user_id, text, event_key, scope, request_ts
+            )
         if debounce and self.debouncer.window > 0:
             # 批次 ID 在冲刷时分配：一次合并 = 一个 event_key
             # 防抖缓冲区也必须按分区隔离：同一个人在 A、B 两个群同时说话，
@@ -1645,7 +1708,13 @@ class EmotionEngine:
             resolved = event_key or batch.event_key(user_id)
         else:
             resolved = event_key or make_event_key(user_id, text, new_batch_id())
-        return await self.process(user_id, text, event_key=resolved, chat_scope=scope)
+        return await self.process(
+            user_id,
+            text,
+            event_key=resolved,
+            chat_scope=scope,
+            request_ts=request_ts,
+        )
 
     async def _whitelisted_payload(
         self,
@@ -1653,6 +1722,7 @@ class EmotionEngine:
         text: str,
         event_key: Optional[str],
         chat_scope: str = DEFAULT_CHAT_SCOPE,
+        request_ts: Optional[int] = None,
     ) -> dict[str, Any]:
         """H-A1：特权用户的判定前短路载荷。
 
@@ -1660,6 +1730,8 @@ class EmotionEngine:
         好感度、``memory.store``、``bump_activity``——特权用户的闲聊不推表。
         保留：按**当前状态**生成 inner_os / actions / final_prompt（Bot 仍要回话），
         记忆检索只读不写。``debug.whitelisted=true`` 留痕，logger 出审计行。
+
+        ``request_ts`` 只用于 debug 留痕（P0-8）；本分支不写库，水位线保持不变。
         """
         snapshot = await asyncio.to_thread(self._get_or_create, user_id, chat_scope)
         level = str(snapshot["level"])
@@ -1701,6 +1773,10 @@ class EmotionEngine:
                 "decayed": False,
                 "applied": False,
                 "whitelisted": True,
+                # P0-8：提前返回也要回显**库中实际水位线**，否则接口层会把本次
+                # 请求的旧 timestamp 当成台账回显（该分支并不写库，水位线不会动）。
+                "arrival_ts": int(snapshot.get("arrival_ts") or 0),
+                "request_ts": int(request_ts or 0),
                 "chat_scope": str(chat_scope),
                 "event_key": event_key or "",
                 "memories": len(memories),
@@ -1811,8 +1887,13 @@ class EmotionEngine:
         message: str,
         event_key: Optional[str] = None,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
+        request_ts: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Track A -> (语义冲突时) Track B -> update_emotion -> 内心 OS + 动作。"""
+        """Track A -> (语义冲突时) Track B -> update_emotion -> 内心 OS + 动作。
+
+        ``request_ts`` 会一路透传到 :meth:`update_emotion`，在那里于锁内做
+        乱序比对（P0-8）：比库里 ``arrival_ts`` 旧的消息被丢弃、不覆盖状态。
+        """
         text = "" if message is None else str(message)
         scope = str(chat_scope)
 
@@ -1924,6 +2005,10 @@ class EmotionEngine:
                     "event_key": event_key or "",
                     # 分区留痕：noise 分支提前返回，也要能看出消息落在哪个分区
                     "chat_scope": scope,
+                    # P0-8：noise 不写库，因此这里回显的是**库中实际水位线**
+                    # （不是本次请求的 timestamp），否则旧消息会把台账回显成旧值。
+                    "arrival_ts": int(snapshot.get("arrival_ts") or 0),
+                    "request_ts": int(request_ts or 0),
                     "memories": len(memories),
                     "bot_mood": bot_mood.get("emotion"),
                     "audit": "skipped",
@@ -1938,7 +2023,12 @@ class EmotionEngine:
 
         # ---------- 3. 平滑 + 衰减 + 落库（event_key 保证重试不重复扣分） ----------
         state = await self.update_emotion(
-            user_id, target, event_key=event_key, risk=risk, chat_scope=scope
+            user_id,
+            target,
+            event_key=event_key,
+            risk=risk,
+            chat_scope=scope,
+            request_ts=request_ts,
         )
 
         # ---------- 3.5 Bot 自身情绪（慢变量，阻尼折算） ----------
@@ -1988,6 +2078,9 @@ class EmotionEngine:
                 "decayed": bool(state["decayed"]),
                 "applied": bool(state["applied"]),
                 "event_key": event_key or "",
+                # P0-8 乱序防御留痕：本次请求的时间戳与是否被判为乱序丢弃
+                "request_ts": int(request_ts or 0),
+                "arrival_ts": int(state.get("arrival_ts") or 0),
                 # 分区留痕：排查「同一个人两个群为什么情绪不同」时一眼能看出来
                 "chat_scope": scope,
                 "memories": len(memories),
