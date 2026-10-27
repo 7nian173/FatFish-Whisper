@@ -356,12 +356,27 @@ class EvolutionEngine:
         day: Optional[datetime.date] = None,
         force: bool = False,
     ) -> dict[str, Any]:
-        """对单个用户跑一次演化，返回结果字典（含 ``appended`` 布尔）。"""
+        """对单个用户跑一次演化，返回**演化建议**（不写盘，死线 D11）。
+
+        Returns:
+            结果字典。顶层键：
+
+            - ``suggested_persona_append``（**必存在**）：建议追加到人设卡末尾的
+              文本，没有可用建议时是空串 ``""``（绝不是 ``None``）；是否采纳由
+              宿主决定，本模块不再写盘。
+            - ``appended``：旧键，语义已改为「产出了可用建议」，
+              **不再表示写过盘**。
+            - ``reason`` / ``append`` / ``ooc`` / ``compressed`` /
+              ``persona_chars``：旧键，保留兼容。
+
+        ``persona_chars`` 是「若采纳该建议后人设卡的字数」估算值，不是写盘结果。
+        """
         target_day = day or self._clock().date()
         result: dict[str, Any] = {
             "user_id": user_id,
             "day": target_day.isoformat(),
             "appended": False,
+            "suggested_persona_append": "",
             "reason": "",
         }
 
@@ -408,12 +423,14 @@ class EvolutionEngine:
                 result["reason"] = "compress_failed_keep_original"
                 return result
 
-        self.write_persona(merged)
-        result["appended"] = True
+        # 死线 D11：演化只产出建议，**不写盘**（写 persona.txt 会污染性格向量）。
+        # write_persona 方法保留给宿主/夹具显式调用，演化流程绝不触碰。
+        result["appended"] = True  # 语义：产出了可用建议
+        result["suggested_persona_append"] = append_text
         result["reason"] = "ok"
         result["compressed"] = compressed
         result["persona_chars"] = len(merged)
-        logger.info("演化写入成功：user=%s append=%s", user_id, append_text)
+        logger.info("演化建议产出：user=%s append=%s", user_id, append_text)
         return result
 
     def _memory_digest(self, user_id: str) -> str:

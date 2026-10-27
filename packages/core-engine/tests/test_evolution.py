@@ -124,17 +124,30 @@ def _build(tmp_path, core_db, env, handler, persona="你是冷酷无情的杀手
 
 
 def test_演化生成追加词并写入人设卡(tmp_path, core_db, env):
-    engine, persona_path, _ = _build(tmp_path, core_db, env, make_handler("开始愿意陪用户看夕阳，语气略软。"))
+    """死线 D11：演化只**产出建议**，建议由返回值携带，物理人设卡一字不动。"""
+    text = "开始愿意陪用户看夕阳，语气略软。"
+    engine, persona_path, _ = _build(tmp_path, core_db, env, make_handler(text))
     before = persona_path.read_text(encoding="utf-8")
 
     result = _run(engine.evolve_user("u1", DAY))
 
     assert result["appended"] is True, result
     assert result["ooc"]["passed"] is True
-    after = persona_path.read_text(encoding="utf-8")
-    assert after.startswith(before.rstrip("\n")), "必须只做加法，原有内容不能被改"
-    assert "看夕阳" in after
+
+    # 1) 建议文本走返回值，不落盘
+    assert "suggested_persona_append" in result
+    assert "看夕阳" in result["suggested_persona_append"], result
+    assert result["suggested_persona_append"] == result["append"]
+    assert len(result["suggested_persona_append"]) <= MAX_APPEND_CHARS
     assert len(result["append"]) <= MAX_APPEND_CHARS
+
+    # 2) 物理文件未变（不写盘才是正确行为）
+    after = persona_path.read_text(encoding="utf-8")
+    assert after == before, "演化建议不得写入物理人设卡"
+    assert "看夕阳" not in after
+
+    # 3) persona_chars 只是"若采纳"的字数估算，不是写盘结果
+    assert result["persona_chars"] == len(before.rstrip("\n") + "\n" + result["append"] + "\n")
 
 
 def test_追加词超80字被硬截断(tmp_path, core_db, env):
@@ -245,23 +258,49 @@ def test_force跳过活跃度闸门(tmp_path, core_db, env):
 
 
 def test_人设卡超1000字触发压缩(tmp_path, core_db, env):
+    """死线 D11：压缩只影响**建议内容**，物理人设卡一字不动。"""
     long_persona = ("你是冷酷无情的杀手。" + "设定细节。" * 500)[:995]
     compressed = "压缩后：你是冷酷无情的杀手，说话极简。"
+    seen: dict[str, str] = {}
+    base = make_handler("开始愿意陪用户看夕阳。", compressed=compressed)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        if "压缩器" in body["messages"][0]["content"]:
+            seen["compress_prompt"] = body["messages"][-1]["content"]
+        return base(request)
+
     engine, persona_path, _ = _build(
         tmp_path,
         core_db,
         env,
-        make_handler("开始愿意陪用户看夕阳。", compressed=compressed),
+        handler,
         persona=long_persona,
     )
-    assert len(engine.read_persona()) <= MAX_PERSONA_CHARS
+    before = persona_path.read_text(encoding="utf-8")
+    assert len(before) <= MAX_PERSONA_CHARS
 
     result = _run(engine.evolve_user("u1", DAY))
 
+    # 1) 压缩链路确实被触发：压缩器收到了「原人设 + 追加词」的超限内容
+    assert "compress_prompt" in seen, "超 1000 字必须调用压缩器"
+    assert "设定细节。" in seen["compress_prompt"]
     assert result["appended"] is True
     assert result["compressed"] is True
-    assert len(engine.read_persona()) <= MAX_PERSONA_CHARS
-    assert engine.read_persona().startswith("压缩后")
+
+    # 2) 物理文件未变：压缩结果不落盘
+    after = persona_path.read_text(encoding="utf-8")
+    assert after == before, "演化建议（含压缩结果）不得写入物理人设卡"
+    assert engine.read_persona() == before
+    assert "压缩后" not in engine.read_persona()
+
+    # 3) 建议内容 = 压缩后文本：persona_chars 是「若采纳」的字数（= len(compressed)）
+    assert len(compressed) <= MAX_PERSONA_CHARS
+    assert result["persona_chars"] == len(compressed)
+    assert result["persona_chars"] <= MAX_PERSONA_CHARS
+    # suggested_persona_append 语义见 evolution.evolve_user docstring：
+    # 它只承载本次演化生成的原始追加词；压缩后的全文由 compressed/persona_chars 表达。
+    assert result["suggested_persona_append"] == "开始愿意陪用户看夕阳。"
 
 
 def test_压缩失败则保持原样不写入(tmp_path, core_db, env):
