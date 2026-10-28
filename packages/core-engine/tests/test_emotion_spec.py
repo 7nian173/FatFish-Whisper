@@ -141,3 +141,73 @@ def test_内心OS随分数变化(engine_factory):
     assert low["inner_os"] != high["inner_os"], "不同情绪状态必须产出不同 OS"
     assert low["debug"]["level"] in ("CRISIS", "L2", "L1"), low["debug"]
     assert high["debug"]["level"] in ("L0", "P1", "P2"), high["debug"]
+
+
+# ---------------------------------------------------------------- F-09 习惯化回收
+
+
+def test_习惯化TTL过期键被回收(engine_factory):
+    """F-09：超过 TTL 未活动的键必须被清扫掉，不能永久留内存。"""
+    engine = engine_factory({})
+    for i in range(5):
+        engine._habituation_alpha("u-ttl-{0}".format(i), 90, chat_scope="g:1")
+    assert len(engine._habit) == 5
+
+    # 冻结时间推到 TTL 之后，强制清扫（绕过最小间隔限制）
+    later = __import__("time").time() + engine._habit_ttl + 1.0
+    removed = engine.prune_habits(now=later)
+    assert removed == 5
+    assert engine._habit == {}
+
+
+def test_习惯化容量上限淘汰最旧键(engine_factory):
+    """F-09：键数超上限时淘汰最久未活跃的键（LRU 近似）。"""
+    engine = engine_factory({"HABIT_CACHE_MAX": "3", "HABIT_PRUNE_INTERVAL": "0"})
+    for i in range(6):
+        engine._habituation_alpha("u-cap-{0}".format(i), 90, chat_scope="g:1")
+    assert len(engine._habit) <= 3
+    # 最新的键必须还在（淘汰的是最旧的）
+    assert ("u-cap-5", "g:1") in engine._habit
+    assert ("u-cap-0", "g:1") not in engine._habit
+
+
+def test_清扫有最小间隔不会每条消息都遍历(engine_factory):
+    """F-09：``HABIT_PRUNE_INTERVAL`` 内的连续调用不重复清扫。"""
+    engine = engine_factory({"HABIT_PRUNE_INTERVAL": "3600"})
+    engine._habituation_alpha("u-int-1", 90, chat_scope="g:1")
+    assert engine.prune_habits() == 0
+    assert engine.prune_habits() == 0
+
+
+def test_prune_habits自取锁不与其他调用死锁(engine_factory):
+    """F-09：``prune_habits`` 自己取锁；``_habituation_alpha`` 持锁走 ``_locked``。
+
+    若实现误让持锁路径再调 ``prune_habits``，``threading.Lock`` 不可重入会死锁。
+    本用例在超时意义上验证：连续调用必须正常返回。
+    """
+    import threading
+
+    engine = engine_factory({"HABIT_PRUNE_INTERVAL": "0"})
+    done = []
+
+    def worker():
+        for i in range(20):
+            engine._habituation_alpha("u-lock-{0}".format(i), 90, chat_scope="g:1")
+            engine.prune_habits()
+        done.append(True)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout=10)
+    assert not thread.is_alive(), "prune 路径疑似死锁"
+    assert done == [True]
+
+
+def test_TTL小于习惯化窗口不改变判定(engine_factory):
+    """F-09 行为零变化：默认 TTL(1800s) ≥ 窗口(900s)，连续 4 次仍按 0.2/0.2/0.1/0.05。"""
+    engine = engine_factory({})
+    alphas = []
+    for _ in range(4):
+        result = _run(engine.update_emotion("u-habit-ttl", 90))
+        alphas.append(result["alpha"])
+    assert alphas == pytest.approx([0.2, 0.2, 0.1, 0.05]), alphas

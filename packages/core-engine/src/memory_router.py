@@ -30,6 +30,8 @@ from __future__ import annotations
 import abc
 import asyncio
 import datetime
+import hashlib
+import hmac
 import logging
 import os
 import sqlite3
@@ -55,6 +57,112 @@ PIN_SALIENCE_THRESHOLD: float = 0.8
 def _utcnow() -> datetime.datetime:
     """naive UTC 当前时间（避开 3.12+ 已弃用的 ``datetime.utcnow()``）。"""
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+# ---------------------------------------------------------------- 外发脱敏（F-10）
+
+#: 脱敏后标识符的截断长度。16 位十六进制 = 64 bit，碰撞概率可忽略，
+#: 同时足够短，不改变外部服务对 key 长度的预期。
+REDACT_HEX_LEN: int = 16
+
+#: 盐钥来源（按优先级）：环境变量 > 本地密钥文件 > 进程内随机（仅告警一次）。
+ENV_REDACT_SALT = "MEMORY_EXTERNAL_SALT"
+REDACT_SALT_FILENAME = "memory_salt.key"
+
+_salt_lock = threading.Lock()
+_salt_cache: dict[str, bytes] = {}
+_salt_warned = False
+
+
+def _load_or_create_salt(directory: str = "") -> bytes:
+    """取脱敏盐钥；缺失时在 ``directory`` 生成 32 字节随机钥并持久化。
+
+    为什么必须持久化：脱敏后的 ``user_id`` 是外部服务的检索主键。若每次进程
+    启动都换钥，历史记忆永远检索不回来（等于每次重启清空外部记忆）。因此盐钥
+    必须跨重启稳定；同时它**不能**是硬编码常量，否则等于无盐哈希。
+
+    优先级：``MEMORY_EXTERNAL_SALT`` 环境变量 > ``directory`` 下的密钥文件 >
+    进程内随机钥（告警，重启即失效）。
+    """
+    global _salt_warned
+    env_salt = (os.environ.get(ENV_REDACT_SALT) or "").strip()
+    if env_salt:
+        return env_salt.encode("utf-8")
+
+    base = directory or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    base = os.path.abspath(base)
+    with _salt_lock:
+        cached = _salt_cache.get(base)
+        if cached is not None:
+            return cached
+        path = os.path.join(base, REDACT_SALT_FILENAME)
+        try:
+            if os.path.exists(path):
+                with open(path, "rb") as handle:
+                    key = handle.read().strip()
+                if key:
+                    _salt_cache[base] = key
+                    return key
+            key = os.urandom(32).hex().encode("ascii")
+            with open(path, "wb") as handle:
+                handle.write(key)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            _salt_cache[base] = key
+            return key
+        except OSError:
+            # 目录不可写（只读容器等）：退化为进程内随机钥，明确告警。
+            if not _salt_warned:
+                _salt_warned = True
+                logger.warning(
+                    "无法持久化脱敏盐钥（%s），本次使用进程内随机钥；"
+                    "重启后外部记忆将无法按原键检索，请设置 %s",
+                    path,
+                    ENV_REDACT_SALT,
+                )
+            key = os.urandom(32).hex().encode("ascii")
+            _salt_cache[base] = key
+            return key
+
+
+def redact_identifier(value: str, salt: Optional[bytes] = None) -> str:
+    """把标识符（QQ 号 / 群号）做 HMAC-SHA256 截断，返回不可逆短串。
+
+    用 HMAC 而不是裸 SHA-256：QQ 号段空间只有约 10⁹，裸哈希可被预计算表
+    几小时内反查；带密钥的 HMAC 让预计算不可行。
+    """
+    key = salt if salt is not None else _load_or_create_salt()
+    digest = hmac.new(key, str(value).encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest[:REDACT_HEX_LEN]
+
+
+def redact_chat_scope(chat_scope: str, salt: Optional[bytes] = None) -> str:
+    """脱敏 ``chat_scope``，**保留分区前缀**以免破坏分房语义。
+
+    ``p:987654321`` → ``p:<hmac16>``；``g:123456789`` → ``g:<hmac16>``。
+    前缀必须保留：它编码「私聊 / 群聊」这一分区类别，且外部服务靠它做隔离。
+    只脱敏后半段的明文 id——那正是原 F-10 条目漏掉的第二处泄露。
+    """
+    scope = str(chat_scope or "")
+    if not scope:
+        return ""
+    head, sep, tail = scope.partition(":")
+    if not sep:
+        return redact_identifier(scope, salt)
+    return head + ":" + redact_identifier(tail, salt)
+
+
+def redact_outbound(
+    user_id: str, chat_scope: str = "", salt_dir: str = ""
+) -> dict[str, str]:
+    """一次性产出对外请求要用的脱敏标识符（同一把盐，保证可检索）。"""
+    salt = _load_or_create_salt(salt_dir)
+    return {
+        "user_id": redact_identifier(user_id, salt),
+        "chat_scope": redact_chat_scope(chat_scope, salt),
+    }
 
 
 
@@ -447,11 +555,19 @@ class HostNativeProvider(IMemoryProvider):
 class ExternalPluginProvider(IMemoryProvider):
     """Mem0 等外部 HTTP 记忆服务（OpenAI 兼容风格的极简封装）。
 
+    外发脱敏（F-10 / 决策 #9）
+    --------------------------
+    ``user_id`` 与 ``chat_scope`` **一律以 HMAC 脱敏形式外发**，明文 QQ 号 /
+    群号不出本机。两处都必须改：私聊的 ``chat_scope`` 就是 ``p:<QQ号>``，
+    只哈希 ``user_id`` 等于没脱敏。
+
     Args:
         base_url: 服务地址，如 ``http://127.0.0.1:8080``。
         api_key: 可选 Bearer。
         timeout: 请求超时（秒）。
         client: 可注入的 httpx.AsyncClient（测试用）。
+        redact: 是否外发脱敏，默认 ``True``；仅排障时可关。
+        salt_dir: 盐钥文件所在目录，默认与记忆库同目录（保证跨重启稳定）。
     """
 
     name = "external_plugin"
@@ -462,14 +578,25 @@ class ExternalPluginProvider(IMemoryProvider):
         api_key: str = "",
         timeout: float = 2.0,
         client: Optional[Any] = None,
+        redact: bool = True,
+        salt_dir: str = "",
     ) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or ""
         self.timeout = float(timeout)
         self._client = client
+        self.redact = bool(redact)
+        self.salt_dir = salt_dir or ""
 
     def health(self) -> bool:
         return bool(self.base_url)
+
+    def _outbound_ids(self, user_id: str, chat_scope: str) -> dict[str, str]:
+        """外发标识符：脱敏开关关闭时退回明文（仅排障用途）。"""
+        if not self.redact:
+            return {"user_id": str(user_id), "chat_scope": str(chat_scope)}
+        return redact_outbound(user_id, chat_scope, self.salt_dir)
+
 
     async def _http(self) -> Any:
         if self._client is None:
@@ -489,16 +616,17 @@ class ExternalPluginProvider(IMemoryProvider):
     ) -> list[str]:
         if not self.health():
             return []
+        ids = self._outbound_ids(user_id, chat_scope)
         try:
             client = await self._http()
             response = await client.post(
                 self.base_url + "/search",
                 json={
-                    "user_id": user_id,
+                    "user_id": ids["user_id"],
                     "query": query,
                     # 分区一并上报：外部服务若忽略它，最多退化到「跨区召回」，
                     # 不会比改造前更糟；本地兜底始终是分房的。
-                    "chat_scope": str(chat_scope),
+                    "chat_scope": ids["chat_scope"],
                     "limit": MEMORY_MAX_INJECT,
                 },
                 headers=self._headers(),
@@ -527,11 +655,16 @@ class ExternalPluginProvider(IMemoryProvider):
     ) -> bool:
         if not self.health():
             return False
+        ids = self._outbound_ids(user_id, chat_scope)
         try:
             client = await self._http()
             response = await client.post(
                 self.base_url + "/add",
-                json={"user_id": user_id, "text": fact, "chat_scope": str(chat_scope)},
+                json={
+                    "user_id": ids["user_id"],
+                    "text": fact,
+                    "chat_scope": ids["chat_scope"],
+                },
                 headers=self._headers(),
             )
             response.raise_for_status()
@@ -579,7 +712,13 @@ class MemoryRouter:
         if host_client is not None:
             chain.append(HostNativeProvider(host_client))
         if external_base_url:
-            chain.append(ExternalPluginProvider(external_base_url, external_api_key))
+            # 盐钥与记忆库同目录：跟着部署走，且跨重启稳定（否则外部记忆检索不到）
+            salt_dir = os.path.dirname(os.path.abspath(db_path)) if db_path else ""
+            chain.append(
+                ExternalPluginProvider(
+                    external_base_url, external_api_key, salt_dir=salt_dir
+                )
+            )
         return cls(chain, LocalSQLiteProvider(db_path, ttl_days=ttl_days))
 
     # ---------------------------------------------------------- 读写

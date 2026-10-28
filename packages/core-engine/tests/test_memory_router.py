@@ -244,3 +244,120 @@ def test_记忆条数超过上限被截断():
         "（嗯。）", "在吗", memories=["记忆{0}".format(i) for i in range(10)]
     )
     assert prompt.count("- 记忆") == 5
+
+
+# ---------------------------------------------------------------- F-10 外发脱敏
+
+
+def test_外发user_id是哈希不是明文(tmp_path):
+    """F-10：``/add`` 与 ``/search`` 的 ``user_id`` 不得出现明文 QQ 号。"""
+    import json
+
+    import httpx
+
+    seen: list[dict] = []
+
+    def handler(request):
+        seen.append(json.loads(request.content.decode("utf-8")))
+        if request.url.path.endswith("/search"):
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json={"ok": True})
+
+    external = ExternalPluginProvider(
+        "http://mem0.local",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        salt_dir=str(tmp_path),
+    )
+    plain = "987654321"
+    _run(external.store(plain, "他喜欢白饭", chat_scope="p:" + plain))
+    _run(external.retrieve(plain, "白饭", chat_scope="p:" + plain))
+
+    assert len(seen) == 2
+    for body in seen:
+        assert body["user_id"] != plain
+        assert plain not in body["user_id"]
+        # 私聊 chat_scope 的 p:<QQ号> 是第二处泄露，必须一起脱敏
+        assert plain not in body["chat_scope"]
+        assert body["chat_scope"].startswith("p:")
+    # 同盐同值 → 两次外发必须一致，否则外部服务检索不回来
+    assert seen[0]["user_id"] == seen[1]["user_id"]
+    assert seen[0]["chat_scope"] == seen[1]["chat_scope"]
+
+
+def test_群号外发也脱敏且保留分区前缀(tmp_path):
+    """群聊 ``g:<gid>``：群号不得外泄，但 ``g:`` 前缀要保留以维持分房语义。"""
+    import json
+
+    import httpx
+
+    seen: list[dict] = []
+
+    def handler(request):
+        seen.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"results": []})
+
+    external = ExternalPluginProvider(
+        "http://mem0.local",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        salt_dir=str(tmp_path),
+    )
+    gid = "123456789"
+    _run(external.store("u1", "群里聊了考试", chat_scope="g:" + gid))
+    body = seen[0]
+    assert gid not in body["chat_scope"]
+    assert body["chat_scope"].startswith("g:")
+    assert body["chat_scope"] != "g:" + gid
+
+
+def test_不同盐产出不同哈希(tmp_path):
+    """盐不同 → 同一 QQ 号哈希不同（证明不是无盐裸哈希）。"""
+    import json
+
+    import httpx
+
+    def make(salt_dir):
+        seen = []
+
+        def handler(request):
+            seen.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"ok": True})
+
+        provider = ExternalPluginProvider(
+            "http://mem0.local",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            salt_dir=str(salt_dir),
+        )
+        _run(provider.store("987654321", "x", chat_scope="p:987654321"))
+        return seen[0]["user_id"]
+
+    left = make(tmp_path / "a")
+    (tmp_path / "b").mkdir()
+    right = make(tmp_path / "b")
+    assert left != right
+
+
+def test_脱敏可关闭用于排障(tmp_path):
+    """``redact=False`` 时保留明文（仅排障；默认必须是脱敏）。"""
+    import json
+
+    import httpx
+
+    seen: list[dict] = []
+
+    def handler(request):
+        seen.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"ok": True})
+
+    external = ExternalPluginProvider(
+        "http://mem0.local",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        redact=False,
+    )
+    _run(external.store("987654321", "x", chat_scope="p:987654321"))
+    assert seen[0]["user_id"] == "987654321"
+    assert seen[0]["chat_scope"] == "p:987654321"
+
+
+def test_默认构造即脱敏():
+    """安全默认：不传任何参数时 ``redact`` 必须为 True。"""
+    assert ExternalPluginProvider("http://mem0.local").redact is True

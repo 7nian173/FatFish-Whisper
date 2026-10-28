@@ -49,3 +49,8 @@ desktop.ini
 # 部署参考文档，仅本地留存
 git的仓库结构.txt
 .workbuddy-ai/
+
+# ================= 脱敏盐钥（F-10）=================
+# memory_salt.key 是本机生成的 HMAC 密钥，泄露即等于脱敏失效；绝不入库。
+memory_salt.key
+*.key

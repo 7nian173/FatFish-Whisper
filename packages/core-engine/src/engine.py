@@ -174,6 +174,17 @@ HABITUATION_ALPHAS: Final[tuple[float, ...]] = (0.2, 0.1, 0.05)
 #: 判定「极性」的死区：目标分离 50 不到这个值算中性，不参与习惯化
 HABITUATION_DEADBAND: Final[int] = 5
 
+#: 习惯化字典的回收参数（F-09 / 死线 D8「所有内存计数器必须绑 TTL」）
+#:
+#: TTL 下限必须 ≥ HABITUATION_WINDOW_SECONDS(900s)：判定只看窗口内的数据，
+#: 键级 TTL 小于窗口会在窗口未满时误删活跃键，直接改变判定行为。
+#: 取 1800s = 2× 窗口，与 auditor.STIMULUS_TTL_SECONDS 既有先例对齐。
+HABIT_TTL_SECONDS: Final[float] = 1800.0
+#: 容量上限：超出后淘汰最久未活跃的键（LRU 近似）。1 万活跃组合 ≈ 18 MB 封顶。
+HABIT_CACHE_MAX: Final[int] = 10000
+#: 两次清扫之间的最小间隔，避免每条消息都做 O(n) 遍历
+HABIT_PRUNE_INTERVAL: Final[float] = 60.0
+
 #: 情绪分段（规格 §五）：0-15 CRISIS / 16-35 L2 / 36-45 L1 / 46-65 L0 / 66-85 P1 / 86-100 P2
 LEVEL_CRISIS_MAX: Final[int] = 15
 LEVEL_L2_MAX: Final[int] = 35
@@ -266,9 +277,10 @@ def _is_negated(reason: str, word: str) -> bool:
     只要存在一处未被修饰的出现就返回 False（视为正话命中）；词不存在时返回
     True，但调用方已用 ``word in reason`` 守门，不会单独依赖此返回值。
 
-    与 :meth:`EmotionEngine._is_negated`（仅 Track A 诊断记录用）刻意分家：
-    诊断口径不改，本处闸门口径收紧，二者语义不同——两份同名实现是否合并，
-    登记为 F-23 待裁决。
+    与 :meth:`EmotionEngine._diagnose_negation`（仅 Track A 诊断记录用，
+    F-23 已改名区分）刻意分家：诊断口径不改，本处闸门口径收紧，二者语义不同。
+    F-23 裁定方案 R——**保持分家、改名区分、勿合并**：合并会把闸门退回 3 字窗口，
+    等于撤销 F-20 修复。
     """
     idx = reason.find(word)
     while idx != -1:
@@ -479,7 +491,9 @@ class TrackA:
                 conflict_hits.append(conflict_match.group(0))
 
         negated = [
-            word for word in (pos_hits + neg_hits) if self._is_negated(text, word)
+            word
+            for word in (pos_hits + neg_hits)
+            if self._diagnose_negation(text, word)
         ]
         signals = len(pos_hits) + len(neg_hits) + len(conflict_hits) + len(risk_hits)
         confidence = clamp(0.30 + 0.18 * signals, 0.0, 0.95)
@@ -611,8 +625,27 @@ class TrackA:
         return result
 
     @staticmethod
-    def _is_negated(text: str, word: str) -> bool:
-        """判断 word 前 3 个字符内是否出现否定词（仅诊断用）。"""
+    def _diagnose_negation(text: str, word: str) -> bool:
+        """判断 word 前 3 个字符内是否出现否定词（**仅 Track A 诊断用**）。
+
+        F-23：本方法与模块级 :func:`_is_negated` **同名不同义，已改名区分**。
+        两者口径差异（本方法刻意保持原样，勿合并）：
+
+        ========== =================================== ==============================
+        维度       本方法（诊断口径）                   模块级 _is_negated（闸门口径）
+        ========== =================================== ==============================
+        窗口        3 字                                 5 字（_NEGATION_WINDOW）
+        标点断句    无                                   有（_NEGATION_BREAKERS）
+        转折断句    无                                   有（_NEGATION_TURNS）
+        多出现      只看第一处 find                      遍历全部，任一处正话即放行
+        词不存在    返回 False                           返回 True
+        用途        Track A 诊断（pos_hits+neg_hits）   P0-4 防记仇闸门
+        ========== =================================== ==============================
+
+        闸门口径服务于 P0-4 防记仇（:func:`_apply_reason_whitelist`）；
+        本方法只服务 Track A 的 ``pos_hits + neg_hits`` 诊断过滤。
+        合并两者会把闸门退回 3 字窗口，等于撤销 F-20 修复。
+        """
         index = text.find(word)
         if index <= 0:
             return False
@@ -1145,6 +1178,14 @@ class EmotionEngine:
         # 键是 (user_id, chat_scope) 元组：习惯化窗口按会话分区隔离
         self._habit: dict[tuple[str, str], Any] = {}
         self._habit_lock = threading.Lock()
+        # F-09：TTL / 容量回收状态。_habit_last_prune 记录上次清扫时刻，
+        # 用于把 O(n) 遍历摊薄到 HABIT_PRUNE_INTERVAL 一次。
+        self._habit_ttl = self._env_float("HABIT_TTL_SECONDS", HABIT_TTL_SECONDS)
+        self._habit_max = int(self._env_float("HABIT_CACHE_MAX", HABIT_CACHE_MAX))
+        self._habit_prune_interval = self._env_float(
+            "HABIT_PRUNE_INTERVAL", HABIT_PRUNE_INTERVAL
+        )
+        self._habit_last_prune = 0.0
         # 批次单飞：同一 event_key 的并发 Track B 评估共享一次 LLM 调用。
         # 防抖合并批内多个等待者会并发走 process()，它们共享同一 event_key，但各自的
         # 关系快照/记忆上下文可能已读到彼此刚落库的结果 → Track B 缓存键不同 → 缓存
@@ -1241,7 +1282,21 @@ class EmotionEngine:
         self, message: str, context: Optional[list[Any]] = None, user_id: str = "",
         relationship: Optional[dict[str, Any]] = None,
     ) -> int:
-        """LLM 复核（语义冲突或无明确信号时调用），永不抛异常。"""
+        """LLM 复核（语义冲突或无明确信号时调用），永不抛异常。
+
+        **契约（F-25）**：本方法**忠实透传**模型返回的分数，**不经过 P0-4
+        防记仇闸门**（:func:`_apply_reason_whitelist`）。闸门是 ``process()``
+        路径的业务策略，只在 :meth:`_evaluate_track_b_locked` 内生效
+        （``engine.py:2099``，行号随编辑漂移，以 ``grep -n _apply_reason_whitelist``
+        实测为准）。
+
+        - 生产代码请走 :meth:`process`，闸门会自动生效。
+        - 直接调用本方法的场景（测试替身、诊断工具、宿主集成）拿到的是
+          **原始分数**，负面值不会被驳回。
+        - 本契约**有意为之**：``tests/test_track_b.py`` 锁定「忠实透传」语义，
+          例如 ``{"emotion_target": 12}`` 期望返回 12 而非 50。把闸门塞进本方法
+          会破坏该契约（F-25 勘察实测：2 failed / 407 passed）。
+        """
         verdict = await self.evaluate_track_b_verdict(
             message, context, user_id=user_id, relationship=relationship
         )
@@ -1254,6 +1309,17 @@ class EmotionEngine:
         """同 :meth:`evaluate_track_b`，但把 ``reason`` / ``confidence`` 一并带回。
 
         P0-4 防记仇的判定依据是 LLM 写的理由，引擎层必须拿到它。
+
+        **契约（F-25）**：与 :meth:`evaluate_track_b` 一致——本方法返回**裸
+        verdict**，**不经过 P0-4 闸门**。闸门在 :meth:`_evaluate_track_b_locked`
+        内（``engine.py:2099``，行号随编辑漂移，以
+        ``grep -n _apply_reason_whitelist`` 实测为准）对本方法的结果再过一道。
+
+        ``reason`` 为 ``None`` 时表示「模型未按三字段协议返回」，闸门侧会
+        fail-closed 驳回（F-22）。但**本方法本身不做该判定**——它只负责透传。
+
+        - 生产代码请走 :meth:`process`，闸门会自动生效。
+        - 直接调用本方法拿到的是**裸 verdict**，负面分数不会被驳回。
         """
         try:
             return await self.track_b.evaluate_verdict(
@@ -1515,12 +1581,69 @@ class EmotionEngine:
                 window.popleft()
             window.append((now, polarity))
             same = sum(1 for ts, p in window if ts >= cutoff and p == polarity)
+            # F-09：惰性清扫放在插入之后，容量上限才是硬上限（插入前清扫会
+            # 让字典短暂达到 max+1）。本函数已持锁，必须走 _locked 版本。
+            self._prune_habits_locked(now)
 
         if polarity == 0 or same < HABITUATION_TRIGGER:
             return SMOOTHING_FACTOR, same
         # 第 3 次 -> 0.1，第 4 次及以后 -> 0.05
         index = min(same - HABITUATION_TRIGGER + 1, len(HABITUATION_ALPHAS) - 1)
         return HABITUATION_ALPHAS[index], same
+
+    def prune_habits(self, now: Optional[float] = None) -> int:
+        """按 TTL / 容量回收 ``_habit``（F-09）。**自己取锁**，可被外部直接调用。
+
+        返回被移除的键数。与 :meth:`_prune_habits_locked` 的分工：
+        调用方**尚未**持 ``_habit_lock`` 时用本方法；已持锁时必须用 ``_locked``
+        版本——``threading.Lock`` 不可重入，自己再取一次会当场死锁。
+        """
+        with self._habit_lock:
+            return self._prune_habits_locked(time.time() if now is None else now)
+
+    def _prune_habits_locked(self, now: float) -> int:
+        """回收实现，**要求调用方已持 ``_habit_lock``**。
+
+        两件事，顺序不能反：
+
+        1. **TTL**：键的「最后活动时间」取 deque 尾元素时间戳；deque 为空
+           （理论上不该出现）时视为立即过期。超过 ``HABIT_TTL_SECONDS`` 删除。
+        2. **容量**：仍超过 ``HABIT_CACHE_MAX`` 时，按最后活动时间升序淘汰最旧
+           的键（LRU 近似）。用 deque 尾部时间戳而不引入第二份访问时间字典，
+           避免双状态不同步。
+
+        清扫被 ``HABIT_PRUNE_INTERVAL`` 摊薄：距上次清扫不足间隔且未超容量时
+        直接返回，保证消息路径不会每条都做 O(n) 遍历。
+        """
+        last = self._habit_last_prune
+        over_capacity = len(self._habit) > self._habit_max
+        if now - last < self._habit_prune_interval and not over_capacity:
+            return 0
+        self._habit_last_prune = now
+
+        removed = 0
+        cutoff = now - self._habit_ttl
+        for key in list(self._habit.keys()):
+            window = self._habit.get(key)
+            if not window:
+                del self._habit[key]
+                removed += 1
+                continue
+            if window[-1][0] < cutoff:
+                del self._habit[key]
+                removed += 1
+
+        overflow = len(self._habit) - self._habit_max
+        if overflow > 0:
+            # 最久未活跃的键排前面；deque 尾时间戳即最后活动时间
+            ordered = sorted(
+                self._habit.items(),
+                key=lambda item: item[1][-1][0] if item[1] else 0.0,
+            )
+            for key, _window in ordered[:overflow]:
+                del self._habit[key]
+                removed += 1
+        return removed
 
     @staticmethod
     def _apply_decay(
@@ -2047,7 +2170,14 @@ class EmotionEngine:
         chat_scope: str = DEFAULT_CHAT_SCOPE,
         with_relationship: bool = False,
     ) -> TrackBVerdict:
-        """真正打一次 Track B；``with_relationship`` 时先读关系快照（仅领头者）。"""
+        """真正打一次 Track B；``with_relationship`` 时先读关系快照（仅领头者）。
+
+        **闸门唯一收口点（F-25）**：全引擎只有本方法会对 Track B 结果施加
+        P0-4 防记仇闸门（:func:`_apply_reason_whitelist`）。任何绕过本方法、
+        直接调 :meth:`evaluate_track_b` / :meth:`evaluate_track_b_verdict`
+        的路径都**不过闸门**，拿到的是裸 verdict——那两个公开方法的 docstring
+        已显式声明该契约，勿在别处补第二道闸门（会造成双重驳回与语义漂移）。
+        """
         relationship: Optional[dict[str, Any]] = None
         if with_relationship:
             snapshot = await asyncio.to_thread(self._get_or_create, user_id, chat_scope)
@@ -2082,7 +2212,7 @@ class EmotionEngine:
         否定前缀（F-20 · P1-1）：白名单词前 5 字窗口内出现「不/没/别/无/非」
         视为反话，不命中——「我不会抱歉」不是道歉，「没什么好担心的」也不是心
         疼。每处出现逐一检查，只要存在一处未被否定修饰的出现即视为正话命中
-        （``_is_negated``）。
+        （模块级 ``_is_negated``，闸门口径；勿与 ``_diagnose_negation`` 混淆）。
 
         否定词不得跨标点生效（``_NEGATION_BREAKERS``）：窗口内若夹标点/空白，
         只取最后一个断句符之后的部分参与判定。因此「怪自己没用，自责」里的

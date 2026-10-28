@@ -1,11 +1,27 @@
-* text=auto
+# 默认：所有文本文件自动检测，检出统一 LF（eol 规则优先级高于本机 core.autocrlf）
+# 未写 eol 时检出换行由各人 core.autocrlf 决定（true→CRLF / input→LF / false→原样），
+# 同一 commit 在不同机器上字节不同。加 eol=lf 后跨平台一致。
+* text=auto eol=lf
 
-# Windows 脚本必须 CRLF，否则 cmd 解析会出问题
+# Windows 脚本必须 CRLF，否则 cmd 解析会出问题（goto/标签跳转在纯 LF 下会失败）
 *.bat text eol=crlf
 
-# 源码统一 LF
+# 以下源码规则保留，作为自我文档化：明确表达「这些扩展名刻意定 LF」，
+# 而不是靠上面的通配兜底。新增同类扩展名时照此追加。
 *.py   text eol=lf
 *.html text eol=lf
 *.json text eol=lf
 *.md   text eol=lf
 *.txt  text eol=lf
+
+# 配置与 CI 文件（此前依赖通配兜底，显式声明便于审阅）
+*.ini  text eol=lf
+*.cfg  text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# SVG 也是文本（XML），需要与其它文本文件一致走 LF 检出。
+# 注：曾疑「单行 svg 被误判为二进制」，实测证伪——git diff 正常出文本 diff，
+# ls-files --eol 显示 i/none 只是「文件内无换行符」的表示，不是二进制判定。
+*.svg text eol=lf
