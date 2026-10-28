@@ -36,7 +36,7 @@ def _patch_track_b(calls: dict, delay: float = 0.0, target: int = 22):
         if delay:
             await asyncio.sleep(delay)  # 模拟真实网络 RTT
         return {
-            "choices": [{"message": {"content": '{"emotion_target": %d}' % target}}],
+            "choices": [{"message": {"content": '{"emotion_target": %d, "reason": "担心你太累了"}' % target}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
 

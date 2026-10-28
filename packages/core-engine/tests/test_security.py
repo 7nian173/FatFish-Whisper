@@ -53,9 +53,9 @@ def test_无信号时带关系状态回落LLM(engine_factory, monkeypatch):
 
     async def fake_evaluate(message, context=None, user_id="", relationship=None):
         captured["relationship"] = relationship
-        return 42
+        return (42, "担心你", 0.8)
 
-    monkeypatch.setattr(engine.track_b, "evaluate", fake_evaluate)
+    monkeypatch.setattr(engine.track_b, "evaluate_verdict", fake_evaluate)
     monkeypatch.setattr(type(engine.track_b), "enabled", property(lambda self: True))
     engine.track_a_min_confidence = TRACK_A_MIN_CONFIDENCE
 

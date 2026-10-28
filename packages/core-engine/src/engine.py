@@ -224,10 +224,65 @@ REASON_WHITELIST: Final[tuple[str, ...]] = (
 
 #: Track B 判定的结构化结果：``(score, reason, confidence)``。
 #:
-#: ``reason`` 为 ``None`` 表示 LLM **没有返回 reason 字段**（旧协议 / 测试替身），
-#: 与「返回了空字符串」语义不同——前者无法据此判定是否记仇，按放行处理以保持
-#: 历史行为；后者是明确给了理由但没命中白名单，必须驳回。
+#: ``reason`` 为 ``None`` 表示 LLM **没有返回 reason 字段**（模型漂移 / 测试替身），
+#: 与「返回了空字符串」一样无法通过白名单审计——两者都判为「没有可审计的理由」，
+#: 按记仇处理、驳回回中性分 50（F-22 · fail-closed）。只有明确给出白名单里的
+#: 理由，扣分才被放行。
 TrackBVerdict = tuple[int, Optional[str], float]
+
+#: F-20 · P1-1 否定前缀表：白名单词前紧邻这些字时视为反话，不命中白名单。
+_NEGATION_PREFIXES: Final[tuple[str, ...]] = ("不", "没", "别", "无", "非")
+
+#: F-20 · P1-1 否定窗口的断句符：否定词与白名单词之间夹了标点/空白就不再是
+#: 修饰关系——「怪自己没用，自责」里的「没」隔着「用，」，不能算否定「自责」。
+_NEGATION_BREAKERS: Final[str] = (
+    "，。、；：！？,.;:!?（）()「」『』《》【】“”\"'’‘…—-～· \t\r\n"
+)
+
+
+#: F-20 · P1-1 否定窗口的转折连词：转折后是另一个分句，前半句的否定词不得跨
+#: 转折修饰后半句——「不抱歉但心疼」里的「不」修饰的是「抱歉」，不是「心疼」。
+_NEGATION_TURNS: Final[tuple[str, ...]] = ("但", "可是", "不过", "然而")
+
+#: F-20 · P1-1 否定检测窗口长度（字符）：白名单词前 5 个字符内出现否定词即视为
+#: 被修饰——覆盖「没什么好担心的」这类隔 3~4 字的中隔反话（3 字窗口时代会漏放行）。
+_NEGATION_WINDOW: Final[int] = 5
+
+
+def _is_negated(reason: str, word: str) -> bool:
+    """word 在 reason 中的所有出现是否都被否定前缀修饰（F-20 · P1-1）。
+
+    判定口径：word 前 5 个字符窗口内出现否定词即视为被修饰——覆盖「不会抱歉」
+    「没什么好担心的」这类否定词与白名单词之间隔几个字的反话。
+
+    **标点断句**（F-20 实施期修正）：窗口内若夹标点/空白，只取最后一个断句符
+    之后的部分参与判定，否定词不得跨标点生效。否则「怪自己没用，自责」里
+    隔着一个「用，」的「没」会把正话「自责」误判成反话（误伤既有白名单用例）。
+
+    **转折断句**（F-20 实施期修正）：窗口内若夹转折连词（``_NEGATION_TURNS``：
+    但 / 可是 / 不过 / 然而），只取最后一个转折连词之后的部分参与判定。否则
+    「不抱歉但心疼」里的「不」会跨转折修饰「心疼」，把正话误判成反话。
+
+    只要存在一处未被修饰的出现就返回 False（视为正话命中）；词不存在时返回
+    True，但调用方已用 ``word in reason`` 守门，不会单独依赖此返回值。
+
+    与 :meth:`EmotionEngine._is_negated`（仅 Track A 诊断记录用）刻意分家：
+    诊断口径不改，本处闸门口径收紧，二者语义不同——两份同名实现是否合并，
+    登记为 F-23 待裁决。
+    """
+    idx = reason.find(word)
+    while idx != -1:
+        window = reason[max(0, idx - _NEGATION_WINDOW):idx]
+        cut = max(window.rfind(ch) for ch in _NEGATION_BREAKERS)
+        for turn in _NEGATION_TURNS:
+            turn_pos = window.rfind(turn)
+            if turn_pos != -1:
+                cut = max(cut, turn_pos + len(turn) - 1)
+        segment = window[cut + 1:]
+        if not any(neg in segment for neg in _NEGATION_PREFIXES):
+            return False
+        idx = reason.find(word, idx + 1)
+    return True
 
 #: 批次 ID 的进程内自增序号（保证同一毫秒内多次冲刷也不撞号）
 _BATCH_SEQ: Final = itertools.count(1)
@@ -650,7 +705,7 @@ class TrackB:
                 # 兼容旧接缝：``evaluate`` 是 TrackB 的公开入口，外部（子类、测试
                 # 替身、运维热补丁）覆盖它就是在接管判分。此时分数归覆盖者所有，
                 # 且拿不到结构化理由——``reason`` 记 ``None``（无可审计理由，
-                # 白名单按放行处理），而不是绕过覆盖者去跑内建链路。
+                # F-22 之后按 fail-closed 驳回），而不是绕过覆盖者去跑内建链路。
                 score = await override(
                     message, context, user_id=user_id, relationship=relationship
                 )
@@ -749,7 +804,7 @@ class TrackB:
             return (TRACK_B_FALLBACK, None, 0.0)
 
         score = int(round(clamp(number, SCORE_MIN, SCORE_MAX)))
-        # reason：缺失 -> None（无法判记仇，保持旧行为放行）；有值 -> 原文
+        # reason：缺失 -> None（无法判记仇，闸门按 fail-closed 驳回）；有值 -> 原文
         raw_reason = parsed.get("reason")
         reason: Optional[str] = None if raw_reason is None else str(raw_reason)
         # confidence：缺失 / 非数值 -> 0.0，越界 clamp 到 [0, 1]
@@ -831,7 +886,8 @@ class TrackB:
         """写缓存（失败不影响返回）。
 
         存 dict 而非裸分数：P0-4 的记仇判定要读回 reason，缓存命中时若丢掉理由，
-        同一句话第二次出现就会被当成「无理由」直接放行，白名单形同虚设。
+        同一句话第二次出现就会退化成「无理由」（None）——F-22 之后按 fail-closed
+        驳回，记仇扣分不会复活。
         """
         try:
             self.cache.set(
@@ -2000,9 +2056,12 @@ class EmotionEngine:
                 "emotion": snapshot["emotion"],
                 "level": snapshot["level"],
             }
-        return await self.evaluate_track_b_verdict(
+        score, reason, confidence = await self.evaluate_track_b_verdict(
             text, memories, user_id=user_id, relationship=relationship
         )
+        # P0-4/F-20（P1-3）：闸门下沉到 verdict 唯一汇聚点，所有 process 路径必经；
+        # evaluate_track_b_verdict 对外入口保持裸 verdict 语义不变。
+        return (self._apply_reason_whitelist(score, reason), reason, confidence)
 
     @staticmethod
     def _apply_reason_whitelist(target: int, track_b_reason: Optional[str]) -> int:
@@ -2014,20 +2073,38 @@ class EmotionEngine:
         target               track_b_reason        结果
         ==================  ====================  ==========================
         >= 50               任意                 原样返回（不拦正向/中性）
-        < 50                ``None``             原样返回（LLM 未给理由，保持旧行为）
+        < 50                ``None``             驳回 -> ``NEUTRAL_TARGET``（50）（无理由可审）
         < 50                命中 REASON_WHITELIST 原样返回（是心疼，不是记仇）
         < 50                未命中 / 空串        驳回 -> ``NEUTRAL_TARGET``（50）
+        < 50                白名单词全部被否定   驳回 -> ``NEUTRAL_TARGET``（50）
         ==================  ====================  ==========================
 
-        ``None`` 与空串的区别是有意的：``None`` 只可能来自「模型没按三字段协议
-        返回」或旧测试替身，此时没有任何理由可审，判记仇没有依据；空串则是模型
-        明确写了 reason 但内容空，属于没通过审计，必须驳回。
+        否定前缀（F-20 · P1-1）：白名单词前 5 字窗口内出现「不/没/别/无/非」
+        视为反话，不命中——「我不会抱歉」不是道歉，「没什么好担心的」也不是心
+        疼。每处出现逐一检查，只要存在一处未被否定修饰的出现即视为正话命中
+        （``_is_negated``）。
+
+        否定词不得跨标点生效（``_NEGATION_BREAKERS``）：窗口内若夹标点/空白，
+        只取最后一个断句符之后的部分参与判定。因此「怪自己没用，自责」里的
+        「没」隔着「用，」，不算否定「自责」——该正话必须照常放行。
+
+        否定词不得跨转折生效（``_NEGATION_TURNS``：但/可是/不过/然而）：窗口内
+        若夹转折连词，只取最后一个转折连词之后的部分参与判定。因此「不抱歉
+        但心疼」里的「不」修饰的是「抱歉」而不是「心疼」——「心疼」必须照常放行。
+
+        ``None`` 与空串现在**同策**（F-22 · fail-closed）：两者都意味着「没有通过
+        审计」，一律驳回回 ``NEUTRAL_TARGET``。``None`` 只可能来自「模型没按三字段
+        协议返回」或旧测试替身——此时没有任何理由可审，按记仇处理，而不是静默放行
+        让整道闸门失效。
         """
         if target >= NEUTRAL_TARGET:
             return target
         if track_b_reason is None:
-            return target
-        if any(word in track_b_reason for word in REASON_WHITELIST):
+            return NEUTRAL_TARGET
+        if any(
+            word in track_b_reason and not _is_negated(track_b_reason, word)
+            for word in REASON_WHITELIST
+        ):
             return target
         logger.warning(
             "[WARN] Emotion drop rejected by reason whitelist: target=%s reason=%r",
@@ -2093,7 +2170,6 @@ class EmotionEngine:
                 target, track_b_reason, track_b_confidence = await self._track_b_once(
                     event_key, text, memories, user_id, chat_scope=scope
                 )
-                target = self._apply_reason_whitelist(target, track_b_reason)
                 path = "deep"
                 track = "B"
                 confidence = 0.9
@@ -2116,7 +2192,6 @@ class EmotionEngine:
                     chat_scope=scope,
                     with_relationship=True,
                 )
-                target = self._apply_reason_whitelist(target, track_b_reason)
                 path = "deep"
                 track = "B"
                 confidence = 0.9
