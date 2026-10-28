@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from .config import AdapterConfig
 from .core_client import CoreClient, NativeLLM
-from .debounce import DebounceQueue, merge_events
 from .executor import ActionExecutor, ExecutionResult
 from .host import CallbackHost, HostAPI, MockHostAPI
 from .models import Action, CoreReply, InboundEvent, Target
@@ -22,8 +21,6 @@ __all__ = [
     "AdapterConfig",
     "CoreClient",
     "NativeLLM",
-    "DebounceQueue",
-    "merge_events",
     "ActionExecutor",
     "ExecutionResult",
     "CallbackHost",

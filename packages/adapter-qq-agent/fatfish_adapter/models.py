@@ -80,6 +80,8 @@ class InboundEvent:
             "is_at_bot": self.is_at_bot,
             # 防抖归属：**Core 是唯一权威**（规格 P0-11）。Adapter 只声明「请合并」，
             # 不再自己开窗口，避免两侧各合并一次导致丢消息。
+            # DebounceQueue 已按 F-19 裁决（2026-10-27 选项 1）封存于 _archive/debounce/，
+            # 不要在 Adapter 侧重新合并；重启条件见该目录 README.md。
             "debounce": True,
             # 会话分区：Core 按它给情绪/记忆分房（I-26）
             "chat_scope": self.target.chat_scope,
