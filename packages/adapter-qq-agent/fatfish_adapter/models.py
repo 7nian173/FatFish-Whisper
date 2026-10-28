@@ -10,6 +10,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+#: 触发口径四值（P0-5，与 Core 的 ``engine.TRIGGER_TYPES`` 同集合）。
+#:
+#: Adapter 只负责**原样声明**，绝不从 ``is_at_bot`` / 群号 / 文本内容推断——
+#: 那属于死线 D9 禁止的行为：口径会改变 Core 的扣分与写库行为，猜错就是记错账。
+TRIGGER_TYPES: tuple[str, ...] = (
+    "user_msg",
+    "proactive",
+    "cron_task",
+    "runtime_context",
+)
+
+#: 缺省口径：宿主看到一条消息时，它默认就是用户真实发言。
+TRIGGER_TYPE_DEFAULT = "user_msg"
+
 
 @dataclass(frozen=True)
 class Target:
@@ -58,6 +72,9 @@ class InboundEvent:
         group_id: 群号；私聊为 None。
         is_at_bot: 是否 @ 了 Bot。
         self_id: Bot 自己的 QQ 号（宿主有就带上，便于后续过滤自身消息）。
+        trigger_type: 触发口径（P0-5，四值见 :data:`TRIGGER_TYPES`）。默认
+            ``user_msg``——宿主侧看到的就是「用户发了一条消息」。**不要按
+            ``is_at_bot`` 或群号去推断**（死线 D9）。
     """
 
     platform_message_id: str
@@ -66,6 +83,7 @@ class InboundEvent:
     group_id: Optional[str] = None
     is_at_bot: bool = False
     self_id: Optional[str] = None
+    trigger_type: str = TRIGGER_TYPE_DEFAULT
 
     @property
     def target(self) -> Target:
@@ -85,6 +103,8 @@ class InboundEvent:
             "debounce": True,
             # 会话分区：Core 按它给情绪/记忆分房（I-26）
             "chat_scope": self.target.chat_scope,
+            # P0-5 触发口径：显式声明，Core 不做任何推断（死线 D9）
+            "trigger_type": self.trigger_type,
         }
         if self.group_id is not None:
             payload["group_id"] = str(self.group_id)

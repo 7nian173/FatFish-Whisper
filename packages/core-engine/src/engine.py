@@ -233,6 +233,32 @@ REASON_WHITELIST: Final[tuple[str, ...]] = (
     "抱歉",
 )
 
+#: P0-5：trigger_type 四口径（规格 §3.1.2 / §3.1.10）。
+#:
+#: ``user_msg``       用户真实发言——现行为，回归基准。
+#: ``proactive``      Bot 主动发起后用户的回应。判定照走，但负面扣分被钳制，
+#:                    否则 Bot 越主动越容易被「已读」伤到，形成越冷越主动、
+#:                    越主动越冷的死循环（钳制点见 :meth:`EmotionEngine.update_emotion`）。
+#: ``cron_task``      定时任务里的例行互动。那不是人际情绪，情绪 / 好感 / bot mood
+#:                    一律不动，只产动作与内心 OS（见 :meth:`EmotionEngine.process`）。
+#: ``runtime_context`` 宿主注入的上下文，压根不是一条真实消息——入口直接短路，
+#:                    不进判重、不落库、不产动作。
+#:
+#: **死线 D9**：Core 任何位置都不得从 ``is_at_bot`` / ``group_id`` / ``message``
+#: 的文本内容推断 trigger_type，只能由调用方显式声明。推断出来的口径一定是错的。
+TRIGGER_TYPES: Final[tuple[str, ...]] = (
+    "user_msg",
+    "proactive",
+    "cron_task",
+    "runtime_context",
+)
+
+#: 缺省口径：调用方不声明时按用户真实发言处理（与历史行为一致，最保守）。
+TRIGGER_TYPE_DEFAULT: Final[str] = "user_msg"
+
+#: runtime_context 短路的返回状态：调用方据此识别「这条没进判定链」。
+STATUS_SKIPPED_RUNTIME_CONTEXT: Final[str] = "skipped_runtime_context"
+
 #: Track B 判定的结构化结果：``(score, reason, confidence)``。
 #:
 #: ``reason`` 为 ``None`` 表示 LLM **没有返回 reason 字段**（模型漂移 / 测试替身），
@@ -1728,6 +1754,7 @@ class EmotionEngine:
         risk: bool = False,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
         request_ts: Optional[int] = None,
+        trigger_type: str = TRIGGER_TYPE_DEFAULT,
     ) -> dict[str, Any]:
         """衰减 + 平滑 + 落库，返回本次更新的完整快照。
 
@@ -1743,6 +1770,8 @@ class EmotionEngine:
                 比库里 ``arrival_ts`` 更旧的消息直接丢弃（``applied=False``），
                 绝不覆盖更新的状态。``None`` 时跳过比对并沿用库里旧值——
                 这样内部调用/老测试不带时间戳也不会互相打架。
+            trigger_type: 触发口径（P0-5）。``proactive`` 时对**负面** target
+                施加「不低于衰减后基准」的钳制，见下方实现注释。
 
         Returns:
             dict，至少包含 ``user_id`` / ``emotion_prev`` / ``emotion_current`` /
@@ -1750,6 +1779,19 @@ class EmotionEngine:
             ``applied`` / ``last_update``。
         """
         target = to_score(target_score, NEUTRAL_TARGET)
+        # ---- P0-5 proactive 钳制 ----
+        # 为什么钳：Bot 主动开口时用户常常不回应或回得很淡，那些「已读」若照常
+        # 扣分，会形成「越主动 -> 越受伤 -> 越冷 -> 越要主动试探」的死循环。
+        # 主动发起是 Bot 自己的选择，代价不该记在用户头上。
+        #
+        # 为什么用 base_prev 而不是落库值：落库值是**上次写入**时的分数，中间隔着
+        # 一段时间的衰减；拿它当基准时，只要本次 target 低于落库值就会被判成
+        # 「负面」，实测 3636 组里有 909 组会误触发钳制（把正常中性互动也抬上去）。
+        # base_prev 是本次真正参与计算的衰减后基准，以它为界才等于「不低于现在」。
+        #
+        # 为什么 risk 时不钳：危机处置的优先级高于防死循环。用户真的处于危险中，
+        # 情绪必须照降——见下方 risk 短路分支。
+        clamp_to_base = trigger_type == "proactive" and not risk
         acquired = await self._acquire_state_lock(user_id, chat_scope)
         if not acquired:
             # 等锁超时：返回当前状态而不是抛错
@@ -1830,6 +1872,26 @@ class EmotionEngine:
             # 调制后必须重新夹一次：±5 是硬不变量，不能被性格系数突破
             delta = clamp(delta, -MAX_DELTA, MAX_DELTA)
             emotion = int(round(clamp(base_prev + delta, SCORE_MIN, SCORE_MAX)))
+
+            # ---- P0-5：proactive 的负面扣分钳制（真正的落点）----
+            # 只在「负面目标 且 算出来比衰减后基准还低」时抬手，其余一律放行：
+            # 用户被主动搭话后回一句好话，照常加分；只有「往下掉」这件事被挡住。
+            if clamp_to_base and target < NEUTRAL_TARGET and emotion < int(round(base_prev)):
+                emotion = int(round(clamp(base_prev, SCORE_MIN, SCORE_MAX)))
+                # delta 必须同步纠正：debug 面板里 ``delta`` 与 ``emotion`` 是
+                # 同一笔账的两面，只改 emotion 会让看板显示「-3 分但分数没降」。
+                delta = clamp(
+                    float(emotion) - base_prev, -MAX_DELTA, MAX_DELTA
+                )
+                logger.info(
+                    "[INFO] Proactive negative drop clamped: user=%s scope=%s"
+                    " target=%s base_prev=%.2f -> emotion=%s",
+                    user_id,
+                    chat_scope,
+                    target,
+                    base_prev,
+                    emotion,
+                )
 
             level = LEVEL_CRISIS if risk else level_of(emotion)
             if level == LEVEL_CRISIS and user_id in self.whitelist:
@@ -2002,6 +2064,7 @@ class EmotionEngine:
         event_key: Optional[str] = None,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
         request_ts: Optional[int] = None,
+        trigger_type: str = TRIGGER_TYPE_DEFAULT,
     ) -> dict[str, Any]:
         """对外主入口：兼容阶段一签名与返回结构。
 
@@ -2018,6 +2081,9 @@ class EmotionEngine:
                 下游模块禁止自拼。默认空串只用于兼容老库/老调用方。
             request_ts: 本次请求的到达时间戳（整型毫秒，P0-8 乱序防御）。
                 透传给 :meth:`update_emotion` 做比对；``None`` 时跳过比对。
+            trigger_type: 触发口径（P0-5，:data:`TRIGGER_TYPES` 四值之一）。
+                ``runtime_context`` 在这里再短路一次——入口已经拦过，但直接调用
+                引擎的测试/内部任务也得受同一条死线约束，不能绕个门就写库。
 
         Note:
             引擎**不会**按文本内容去重 —— 用户真心连发两次同一句话，就该算两次。
@@ -2025,6 +2091,11 @@ class EmotionEngine:
         """
         text = "" if message is None else str(message)
         scope = str(chat_scope)
+        # ---- P0-5：runtime_context 是宿主注入的上下文，不是一条真实消息 ----
+        # 不判定、不写情绪/好感/bot mood、不产动作、不写记忆——只回一个 no-op 快照。
+        # 放在特权短路之前：注入的上下文对谁都不该产生账目。
+        if trigger_type == "runtime_context":
+            return await self.runtime_context_payload(user_id, scope, request_ts)
         # ---- H-A1 特权放行：判定前短路（不扣分/不演化/不计数/不写记忆）----
         # 安全优先于特权：命中硬拦截词的特权用户仍走完整链路——
         # 危机处置不能被一份配置名单绕过（自审结论：否则特权用户求救也得不到 CRISIS 照顾）
@@ -2032,7 +2103,9 @@ class EmotionEngine:
             return await self._whitelisted_payload(
                 user_id, text, event_key, scope, request_ts
             )
-        if debounce and self.debouncer.window > 0:
+        # cron_task 不做防抖合并：定时任务是程序自己发起的，本来就不存在
+        # 「用户连发几条」的场景，合并只会把两次独立巡检搅在一起。
+        if debounce and self.debouncer.window > 0 and trigger_type != "cron_task":
             # 批次 ID 在冲刷时分配：一次合并 = 一个 event_key
             # 防抖缓冲区也必须按分区隔离：同一个人在 A、B 两个群同时说话，
             # 若共用一个 buffer，两条不同群的消息会被合并成一条（跨群串味）。
@@ -2047,7 +2120,117 @@ class EmotionEngine:
             event_key=resolved,
             chat_scope=scope,
             request_ts=request_ts,
+            trigger_type=trigger_type,
         )
+
+    async def runtime_context_payload(
+        self,
+        user_id: str,
+        chat_scope: str,
+        request_ts: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """runtime_context 的 no-op 快照：**一行都不写**。
+
+        为什么连 ``_get_or_create`` 都不调：它会「不存在则建行」。宿主注入上下文
+        不该凭空给一个用户造出状态行（那会让「从没说过话的人」出现在看板上）。
+        这里只读已有行，读不到就用默认值拼一个只读快照。
+        """
+        snapshot = await asyncio.to_thread(self._peek_state, user_id, chat_scope)
+        emotion = int(snapshot["emotion"])
+        level = str(snapshot["level"])
+        affinity = int(snapshot["affinity"])
+        return {
+            "actions": [],
+            "inner_os": "",
+            "final_prompt": "",
+            "status": STATUS_SKIPPED_RUNTIME_CONTEXT,
+            "skipped": True,
+            "debug": {
+                "emotion": emotion,
+                "prev": float(emotion),
+                "delta": 0.0,
+                "affinity": affinity,
+                "level": level,
+                "tone": level,
+                "crisis": level == LEVEL_CRISIS,
+                "path": "skipped",
+                "track": "none",
+                "reason": "trigger_type=runtime_context：注入上下文不进判定链",
+                "confidence": 0.0,
+                "target": emotion,
+                "undefined": False,
+                "intent_type": "runtime_context",
+                "band": "crisis" if level == LEVEL_CRISIS else tone_band_of(emotion),
+                "alpha": 0.0,
+                "habituation": 0,
+                "decayed": False,
+                "applied": False,
+                "event_key": "",
+                "trigger_type": "runtime_context",
+                "chat_scope": chat_scope,
+                # 不写库 -> 水位线保持库中旧值，绝不回显本次请求时间戳
+                "arrival_ts": int(snapshot.get("arrival_ts") or 0),
+                "request_ts": int(request_ts or 0),
+                "memories": 0,
+                "bot_mood": snapshot.get("bot_mood"),
+                "audit": "skipped",
+            },
+        }
+
+    def _peek_bot_mood(self) -> Optional[int]:
+        """**只读** Bot 心情：没有行就返回 ``None``，绝不建行。
+
+        存在理由：``_get_bot_mood`` 会「不存在则建行」，而 runtime_context /
+        只读看板这类「只观察」的路径不该产生任何写入。若在这里复用
+        ``_get_bot_mood``，一次注入上下文就会凭空建出一行 ``bot_mood``——
+        正是 P0-5 要禁止的副产物。
+
+        返回 ``None`` 与「没记过」同义，调用方可据此区分「没记过」与「记过是 50」。
+        """
+        with self.Session() as session:
+            row = session.get(BotMood, 1)
+            if row is None:
+                return None
+            return int(row.emotion_current if row.emotion_current is not None else DEFAULT_EMOTION)
+
+    def _peek_state(self, user_id: str, chat_scope: str = DEFAULT_CHAT_SCOPE) -> dict[str, Any]:
+        """**只读**状态：读不到就返回默认值快照，绝不建行。
+
+        与 :meth:`_get_or_create` 的差别只有一个——没有写。给「只观察、不改状态」
+        的路径用（runtime_context 短路、只读看板），避免副产物污染台账。
+        """
+        scope = str(chat_scope)
+        affinity = self._read_affinity(user_id)
+        bot_mood = self._peek_bot_mood()
+        with self.Session() as session:
+            row = session.get(UserState, (user_id, scope))
+            if row is None:
+                return {
+                    "user_id": user_id,
+                    "chat_scope": scope,
+                    "emotion": DEFAULT_EMOTION,
+                    "level": DEFAULT_LEVEL,
+                    "affinity": affinity,
+                    "last_update": None,
+                    "last_event_key": None,
+                    "arrival_ts": 0,
+                    "bot_mood": bot_mood,
+                }
+            return {
+                "user_id": user_id,
+                "chat_scope": scope,
+                "emotion": int(
+                    row.emotion_current
+                    if row.emotion_current is not None
+                    else DEFAULT_EMOTION
+                ),
+                "level": row.emotion_level or DEFAULT_LEVEL,
+                "affinity": affinity,
+                "last_update": row.last_update,
+                "last_event_key": getattr(row, "last_event_key", None),
+                "arrival_ts": int(getattr(row, "arrival_ts", 0) or 0),
+                "bot_mood": bot_mood,
+            }
 
     async def _whitelisted_payload(
         self,
@@ -2281,14 +2464,23 @@ class EmotionEngine:
         event_key: Optional[str] = None,
         chat_scope: str = DEFAULT_CHAT_SCOPE,
         request_ts: Optional[int] = None,
+        trigger_type: str = TRIGGER_TYPE_DEFAULT,
     ) -> dict[str, Any]:
         """Track A -> (语义冲突时) Track B -> update_emotion -> 内心 OS + 动作。
 
         ``request_ts`` 会一路透传到 :meth:`update_emotion`，在那里于锁内做
         乱序比对（P0-8）：比库里 ``arrival_ts`` 旧的消息被丢弃、不覆盖状态。
+
+        ``trigger_type``（P0-5）改变两处行为：``runtime_context`` 在入口就已
+        短路（见 :meth:`handle_message`）；``cron_task`` 跳过第 3 步
+        :meth:`update_emotion`、第 3.5 步 :meth:`_update_bot_mood` 与第 4 步
+        :meth:`_bump_affinity`，情绪 / 好感 / bot mood 一律不动，只产动作与内心 OS。
         """
         text = "" if message is None else str(message)
         scope = str(chat_scope)
+        # cron_task 是程序例行巡检，不是人际互动：情绪/好感/bot mood 一律不记，
+        # 只产动作与内心 OS。三个写点统一按这个开关短路（下方 else 分支保留原行为）。
+        skip_personal_ledger = trigger_type == "cron_task"
 
         # ---------- 0. 记忆检索（插拔路由：宿主 > 外部 > 本地兜底） ----------
         # 记忆按会话分区检索：A 群的聊天内容绝不进 B 群的 prompt（§3.4.7）
@@ -2402,6 +2594,8 @@ class EmotionEngine:
                     "event_key": event_key or "",
                     # 分区留痕：noise 分支提前返回，也要能看出消息落在哪个分区
                     "chat_scope": scope,
+                    # P0-5：口径留痕（noise 早退路径同样要带，否则看板缺字段）
+                    "trigger_type": trigger_type,
                     # P0-8：noise 不写库，因此这里回显的是**库中实际水位线**
                     # （不是本次请求的 timestamp），否则旧消息会把台账回显成旧值。
                     "arrival_ts": int(snapshot.get("arrival_ts") or 0),
@@ -2419,22 +2613,52 @@ class EmotionEngine:
         override = audit.directive or None
 
         # ---------- 3. 平滑 + 衰减 + 落库（event_key 保证重试不重复扣分） ----------
-        state = await self.update_emotion(
-            user_id,
-            target,
-            event_key=event_key,
-            risk=risk,
-            chat_scope=scope,
-            request_ts=request_ts,
-        )
+        if skip_personal_ledger:
+            # cron_task：不写情绪。用**只读**快照拼同形结果，绝不建行也绝不改行。
+            snapshot = await asyncio.to_thread(self._peek_state, user_id, scope)
+            state = {
+                "user_id": user_id,
+                "emotion_prev": float(snapshot["emotion"]),
+                "emotion_current": int(snapshot["emotion"]),
+                "emotion_level": str(snapshot["level"]),
+                "delta": 0.0,
+                "affinity_raw": int(snapshot["affinity"]),
+                "decayed": False,
+                "applied": False,
+                "arrival_ts": int(snapshot.get("arrival_ts") or 0),
+                "emotion_band": (
+                    "crisis"
+                    if snapshot["level"] == LEVEL_CRISIS
+                    else tone_band_of(int(snapshot["emotion"]))
+                ),
+                "alpha": 0.0,
+                "habituation": 0,
+            }
+        else:
+            state = await self.update_emotion(
+                user_id,
+                target,
+                event_key=event_key,
+                risk=risk,
+                chat_scope=scope,
+                request_ts=request_ts,
+                trigger_type=trigger_type,
+            )
 
         # ---------- 3.5 Bot 自身情绪（慢变量，阻尼折算） ----------
-        bot_mood = await asyncio.to_thread(self._update_bot_mood, target)
+        if skip_personal_ledger:
+            bot_mood = await asyncio.to_thread(self._get_bot_mood)
+        else:
+            bot_mood = await asyncio.to_thread(self._update_bot_mood, target)
 
         # ---------- 4. 好感度（独立于情绪值，原样保留 DB 里的值再微调） ----------
-        affinity = await asyncio.to_thread(
-            self._bump_affinity, user_id, int(state["emotion_current"])
-        )
+        if skip_personal_ledger:
+            # cron 不写好感：好感是「对这个人」的长期锚点，例行巡检不该撬动它
+            affinity = await asyncio.to_thread(self._read_affinity, user_id)
+        else:
+            affinity = await asyncio.to_thread(
+                self._bump_affinity, user_id, int(state["emotion_current"])
+            )
 
         # ---------- 5. 内心 OS + 动作 ----------
         level = str(state["emotion_level"])
@@ -2479,6 +2703,9 @@ class EmotionEngine:
                 "decayed": bool(state["decayed"]),
                 "applied": bool(state["applied"]),
                 "event_key": event_key or "",
+                # P0-5：口径留痕。看板/日志必须能看出这笔账是按哪条口径记的，
+                # 排查「为什么这条没扣分」时第一眼看的就是它。
+                "trigger_type": trigger_type,
                 # P0-8 乱序防御留痕：本次请求的时间戳与是否被判为乱序丢弃
                 "request_ts": int(request_ts or 0),
                 "arrival_ts": int(state.get("arrival_ts") or 0),

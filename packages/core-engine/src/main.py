@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
+import logging
 import os
 import re
 import shutil
@@ -23,7 +24,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
 
@@ -35,7 +36,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from engine import EmotionEngine, bands_meta
+from engine import (
+    STATUS_SKIPPED_RUNTIME_CONTEXT,
+    TRIGGER_TYPE_DEFAULT,
+    TRIGGER_TYPES,
+    EmotionEngine,
+    bands_meta,
+)
 from security import (
     AUTH_MODE_LOOPBACK,
     AUTH_MODE_TOKEN,
@@ -43,6 +50,8 @@ from security import (
     is_loopback_ip,
     verify_bind_policy,
 )
+
+logger = logging.getLogger("ffw.core.main")
 
 WEB_DIR = os.path.join(SRC_DIR, "web")
 INDEX_PATH = os.path.join(WEB_DIR, "index.html")
@@ -162,6 +171,16 @@ class ChatRequest(BaseModel):
         "不传则由 Core 用当前时间兜底；传了就参与乱序比对——比库里的 arrival_ts 旧的消息"
         "会被丢弃，绝不会覆盖更新的状态。",
     )
+    # ---- P0-5：触发口径（规格 §3.1.2）----
+    # 必须用 None 三态而不是直接默认 "user_msg"：只有「调用方没声明」才该打
+    # [WARN] 提示 Adapter 该补字段；默认值写死就永远区分不出「声明了 user_msg」
+    # 和「忘了传」。非法值由 Literal 让 Pydantic 自动返回 422，禁自定义校验。
+    trigger_type: Optional[Literal["user_msg", "proactive", "cron_task", "runtime_context"]] = Field(
+        default=None,
+        description="触发口径四值：user_msg / proactive / cron_task / runtime_context。"
+        "不传按 user_msg 处理并打 WARN；**Core 绝不从消息内容推断**（死线 D9）——"
+        "proactive 与 cron_task 会改变扣分与写库行为，猜错就等于记错账。",
+    )
 
 
 class ConfigRequest(BaseModel):
@@ -178,6 +197,42 @@ class PersonaRequest(BaseModel):
     """
 
     text: str = Field(min_length=1, max_length=20000, description="人设卡全文")
+
+
+class CompensateRequest(BaseModel):
+    """P0-9：补偿请求——用原始消息重走一次完整判定链。
+
+    为什么需要它：Adapter 有 3 秒铁律，超时就立刻降级回话。可 Core 可能只是慢，
+    并没有失败；那条消息的情绪账就这么凭空少了一笔。补偿端点让 Adapter 事后补账：
+    **同一条原始消息、同一个 event_key**，重走判定链，把漏掉的情绪补上。
+
+    为什么字段不照抄 ``ChatRequest``：补偿请求带的是「已经发生过的那件事」，
+    所以没有 ``debounce``（重放不需要再合并）、必须有 ``original_event_key``
+    （幂等靠它，否则重试会把同一句话扣两次分）。
+    """
+
+    user_id: str = Field(default="10001", description="宿主侧的稳定用户 ID")
+    message: str = Field(min_length=1, description="**原始**那条消息的文本，不要改写")
+    chat_scope: Optional[str] = Field(
+        default=None,
+        description="会话分区。补偿时**必须**与原始请求一致，否则会补到另一个房间去；"
+        "不传则由 group_id 派生（与 /api/v1/chat 同规则）。",
+    )
+    group_id: Optional[str] = Field(default=None, description="群号；私聊为 None")
+    trigger_type: Optional[Literal["user_msg", "proactive", "cron_task", "runtime_context"]] = Field(
+        default=None,
+        description="原始请求的触发口径，口径不一致会补出错误的账。缺省处理与 /api/v1/chat 同口径。",
+    )
+    original_event_key: str = Field(
+        min_length=1,
+        description="**原始请求**的幂等键（Adapter 当时发出的 event_key / platform_message_id）。"
+        "同一个键重复补偿只生效一次：第二次直接返回当前状态，不会二次扣分。",
+    )
+    timestamp: Optional[int] = Field(
+        default=None,
+        description="原始消息在宿主侧产生的时刻（整型毫秒）。传了就参与 P0-8 乱序比对——"
+        "补偿一条比库里水位线更旧的消息，会被正常丢弃（账已经翻篇了，不该补回去）。",
+    )
 
 
 # ------------------------------------------------------------------ .env 读写
@@ -613,6 +668,30 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     if request_ts is None:
         request_ts = int(time.time() * 1000)
 
+    # ---- P0-5：解析触发口径 ----
+    # 缺省（None）不是「猜一个」，而是「调用方没声明」：按最保守的 user_msg 走，
+    # 同时打 WARN 提示 Adapter 该补字段。这里绝不从 message/group_id 推断口径
+    # （死线 D9）——口径会改变扣分与写库行为，猜错就等于记错账。
+    trigger_type = req.trigger_type
+    if trigger_type is None:
+        logger.warning("[WARN] trigger_type missing, defaulting to user_msg")
+        trigger_type = TRIGGER_TYPE_DEFAULT
+
+    # ---- P0-5：runtime_context 硬短路（必须在判重之前）----
+    # 为什么必须在判重前：`IngressDeduper.is_duplicate` 未命中即 set key，宿主用
+    # 同一个 message_id 随后发来的真消息会被当成幽灵直接吞掉；而且宿主注入的
+    # 上下文本来就不该进入判重账本。放在这里同时天然规避了末尾
+    # `payload["status"] = "ok"` 的无条件覆盖（早返回走不到那一行）。
+    if trigger_type == "runtime_context":
+        payload = await engine.runtime_context_payload(
+            req.user_id, chat_scope, request_ts
+        )
+        payload["duplicate"] = False
+        payload["platform_message_id"] = req.platform_message_id
+        payload["chat_scope"] = chat_scope
+        payload["arrival_ts"] = int((payload.get("debug") or {}).get("arrival_ts") or 0)
+        return payload
+
     # ---- 入口判重（幽灵消息）：有平台 message_id 就按 id 判，没有退化为文本短窗口 ----
     if engine.ingress_deduper.is_duplicate(
         req.user_id, req.message, req.platform_message_id, chat_scope
@@ -642,6 +721,7 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
             event_key=event_key,
             chat_scope=chat_scope,
             request_ts=request_ts,
+            trigger_type=trigger_type,
         )
     except Exception as exc:  # 兜底：绝不让情绪机把宿主 Bot 拖挂
         raise HTTPException(status_code=500, detail="判定失败: " + str(exc))
@@ -653,6 +733,71 @@ async def chat_endpoint(req: ChatRequest) -> dict[str, Any]:
     # 业务层返回的是库中**实际**水位线；旧消息被丢弃时不能回显本次旧 timestamp。
     # 注意不能写成 `... or request_ts`：水位线真为 0（老行、尚未应用任何带时间戳
     # 的请求）时它是合法值，用 falsy 兜底会把本次 timestamp 冒充成台账。
+    debug = payload.get("debug") or {}
+    if "arrival_ts" in debug:
+        payload["arrival_ts"] = int(debug.get("arrival_ts") or 0)
+    else:
+        payload["arrival_ts"] = request_ts
+    return payload
+
+
+@app.post("/api/v1/compensate")
+async def compensate_endpoint(req: CompensateRequest) -> dict[str, Any]:
+    """P0-9：用原始消息重走一次判定链，把 Adapter 3 秒铁律漏掉的情绪补回来。
+
+    与 ``/api/v1/chat`` 的三处刻意差异：
+
+    1. **不调 ingress_deduper**。两个理由各自独立成立：Core 超时场景下原消息的
+       dedup key 在超时前已被 ``is_duplicate`` 占住，走判重必被吞；而且补偿本身
+       也不该消费判重账本——它不是一条新消息，是同一件事的补账。
+    2. **event_key 用 original_event_key**。引擎的幂等靠它：同一个键重发直接返回
+       当前状态（``applied=False``），绝不会二次扣分。
+    3. **不带 debounce**。这是重放一件已经发生过的事，不该再进合并窗口。
+
+    时间戳照常参与 P0-8 比对：补一条比库里水位线更旧的消息会被正常丢弃——
+    账已经翻篇了，不该补回去。
+    """
+    engine = getattr(app.state, "engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="引擎尚未就绪")
+
+    chat_scope = derive_chat_scope(req.user_id, req.group_id, req.chat_scope)
+    request_ts = int(req.timestamp) if req.timestamp is not None and int(req.timestamp) > 0 else None
+
+    trigger_type = req.trigger_type
+    if trigger_type is None:
+        logger.warning("[WARN] trigger_type missing, defaulting to user_msg")
+        trigger_type = TRIGGER_TYPE_DEFAULT
+
+    # runtime_context 不是一条真实消息，补偿它没有意义（也没有任何账要补）
+    if trigger_type == "runtime_context":
+        return {
+            "status": STATUS_SKIPPED_RUNTIME_CONTEXT,
+            "applied": False,
+            "compensated": False,
+            "actions": [],
+            "inner_os": "",
+            "debug": {
+                "reason": "runtime_context 无需补偿：注入上下文不产生任何账目",
+                "trigger_type": "runtime_context",
+            },
+        }
+
+    try:
+        payload = await engine.process(
+            req.user_id,
+            req.message,
+            event_key=req.original_event_key,
+            chat_scope=chat_scope,
+            request_ts=request_ts,
+            trigger_type=trigger_type,
+        )
+    except Exception as exc:  # 兜底：补偿失败不能让 Adapter 的补账任务炸掉
+        raise HTTPException(status_code=500, detail="补偿失败: " + str(exc))
+
+    payload["status"] = "ok"
+    payload["compensated"] = True
+    payload["chat_scope"] = chat_scope
     debug = payload.get("debug") or {}
     if "arrival_ts" in debug:
         payload["arrival_ts"] = int(debug.get("arrival_ts") or 0)
