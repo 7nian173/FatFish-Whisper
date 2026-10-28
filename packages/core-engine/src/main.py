@@ -13,6 +13,7 @@ import contextlib
 import datetime
 import os
 import re
+import shutil
 import sys
 import time
 
@@ -34,7 +35,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from engine import EmotionEngine
+from engine import EmotionEngine, bands_meta
 from security import (
     AUTH_MODE_LOOPBACK,
     AUTH_MODE_TOKEN,
@@ -45,6 +46,7 @@ from security import (
 
 WEB_DIR = os.path.join(SRC_DIR, "web")
 INDEX_PATH = os.path.join(WEB_DIR, "index.html")
+LEGACY_INDEX_PATH = os.path.join(WEB_DIR, "index.legacy.html")
 
 HOST = os.environ.get("CORE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CORE_PORT", "8000"))
@@ -103,21 +105,9 @@ async def lifespan(application: FastAPI):
     # 阶段五：可选的夜间演化定时任务（EVOLUTION_ENABLED=1 才启动）
     evolution = None
     task = None
-    if os.environ.get("EVOLUTION_ENABLED", "0").strip() in ("1", "true", "True"):
-        from evolution import EvolutionEngine
-
-        evolution = EvolutionEngine(
-            db_path=os.path.join(CORE_DIR, "app.db"),
-            persona_path=os.environ.get("PERSONA_PATH")
-            or os.path.join(CORE_DIR, "persona.txt"),
-            backups_dir=os.environ.get("BACKUP_DIR")
-            or os.path.join(CORE_DIR, "backups"),
-            memory=engine.memory.local,
-            env=engine.env,
-            monitor=engine.monitor,
-            session_factory=engine.Session,
-        )
-        task = asyncio.create_task(evolution.scheduler())
+    if _evolution_enabled():
+        evolution = _build_evolution(application, engine)
+        task = asyncio.create_task(evolution.scheduler(on_report=_record_evolution))
         print("[FatFish-Whisper] 演化定时任务已启动（每天 03:00 UTC）")
 
     try:
@@ -178,6 +168,16 @@ class ConfigRequest(BaseModel):
     api_base: Optional[str] = None
     api_key: Optional[str] = None
     model: Optional[str] = None
+
+
+class PersonaRequest(BaseModel):
+    """人设卡全文。
+
+    上限 20000 字：不是为了防人设长，而是防一次误粘贴把文件写成几十兆
+    （演化压缩阈值只有 1000 字，超过会走 LLM 压缩，太离谱的直接拒收）。
+    """
+
+    text: str = Field(min_length=1, max_length=20000, description="人设卡全文")
 
 
 # ------------------------------------------------------------------ .env 读写
@@ -245,6 +245,57 @@ def _update_env_file(path: str, updates: dict[str, str]) -> None:
         handle.write("\n".join(output).rstrip("\n") + "\n")
 
 
+# ------------------------------------------------------------------ 演化 / 人设
+
+
+def _persona_path() -> str:
+    return os.environ.get("PERSONA_PATH") or os.path.join(CORE_DIR, "persona.txt")
+
+
+def _backups_dir() -> str:
+    return os.environ.get("BACKUP_DIR") or os.path.join(CORE_DIR, "backups")
+
+
+def _evolution_enabled() -> bool:
+    return os.environ.get("EVOLUTION_ENABLED", "0").strip() in ("1", "true", "True")
+
+
+def _build_evolution(application: FastAPI, engine: Any) -> Any:
+    """构造演化引擎（**懒加载**：不配 EVOLUTION_ENABLED 也不该在启动时建目录）。"""
+    from evolution import EvolutionEngine
+
+    evolution = EvolutionEngine(
+        # 复用引擎自己的 db 路径：测试注入临时库时不会被偷偷指回真实 app.db
+        db_path=getattr(engine, "db_path", None) or os.path.join(CORE_DIR, "app.db"),
+        persona_path=_persona_path(),
+        backups_dir=_backups_dir(),
+        memory=engine.memory.local,
+        env=engine.env,
+        monitor=engine.monitor,
+        session_factory=engine.Session,
+    )
+    application.state.evolution = evolution
+    return evolution
+
+
+def _get_evolution(application: FastAPI, engine: Any) -> Any:
+    existing = getattr(application.state, "evolution", None)
+    if existing is None:
+        existing = _build_evolution(application, engine)
+    return existing
+
+
+def _record_evolution(report: Any) -> None:
+    """定时任务每轮结束的回调：把报告留在 app.state 供后台查询。"""
+    app.state.evolution_last_report = report.as_dict()
+    app.state.evolution_last_run_at = (
+        datetime.datetime.now(datetime.timezone.utc)
+        .replace(tzinfo=None)
+        .isoformat()
+        + "Z"
+    )
+
+
 # ------------------------------------------------------------------ 页面
 
 @app.get("/", include_in_schema=False)
@@ -257,6 +308,18 @@ async def admin_panel() -> HTMLResponse:
     if not os.path.exists(INDEX_PATH):
         raise HTTPException(status_code=500, detail="web/index.html 缺失")
     with open(INDEX_PATH, "r", encoding="utf-8") as handle:
+        return HTMLResponse(handle.read())
+
+
+@app.get("/admin/legacy", response_class=HTMLResponse, include_in_schema=False)
+async def admin_legacy_panel() -> HTMLResponse:
+    """旧版控制台（只保留状态看板 + 参数配置 + 测试对话）。
+
+    留着它是为了让"新版渲染出问题"有一条一键回退的路，而不是让人去 git 里翻。
+    """
+    if not os.path.exists(LEGACY_INDEX_PATH):
+        raise HTTPException(status_code=404, detail="旧版控制台已被移除")
+    with open(LEGACY_INDEX_PATH, "r", encoding="utf-8") as handle:
         return HTMLResponse(handle.read())
 
 
@@ -296,6 +359,140 @@ async def state_list(limit: int = 100) -> dict[str, Any]:
         "users": engine.list_states(limit=limit),
         "bot_mood": engine._get_bot_mood(),
         "traits": engine.traits.as_dict(),
+        # 六段情绪带的唯一真源（前端按 band 键做颜色映射，不再自己抄阈值）
+        "bands": bands_meta(),
+    }
+
+
+@app.get("/api/v1/admin/evolution_status")
+async def evolution_status() -> dict[str, Any]:
+    """演化系统的运行状态（后台时间线的数据源）。
+
+    字段里 ``last_result`` 只在本次进程内跑过演化时才有值——定时任务是
+    进程内 asyncio 任务，重启即清空，这是有意的（不做持久化审计表）。
+    """
+    engine = getattr(app.state, "engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="引擎尚未就绪")
+
+    evolution = _get_evolution(app, engine)
+    from evolution import MAX_PERSONA_CHARS
+
+    latest = evolution.latest_backup()
+    backup_count = 0
+    try:
+        backup_count = len(
+            [
+                name
+                for name in os.listdir(_backups_dir())
+                if name.startswith(os.path.splitext(os.path.basename(_persona_path()))[0])
+                and name.endswith(".txt")
+            ]
+        )
+    except OSError:
+        backup_count = 0
+
+    last = getattr(app.state, "evolution_last_report", None)
+    ooc_passed = len(last.get("evolved") or []) if isinstance(last, dict) else 0
+    ooc_rejected = 0
+    if isinstance(last, dict):
+        ooc_rejected = sum(
+            1
+            for item in (last.get("skipped") or [])
+            if "ooc" in str(item.get("reason", "")).lower()
+        )
+
+    active = 0
+    try:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        active = len(evolution.active_users(today))
+    except Exception:  # 数据库异常不该让后台整页 500
+        active = 0
+
+    return {
+        "enabled": _evolution_enabled(),
+        "next_run_at": evolution.next_run_at().isoformat() + "Z",
+        "last_run_at": getattr(app.state, "evolution_last_run_at", None),
+        "last_result": last,
+        "backup": {
+            "latest": os.path.basename(latest) if latest else None,
+            "count": backup_count,
+        },
+        "ooc_probe": {"passed": ooc_passed, "rejected": ooc_rejected},
+        "active_users": active,
+        "persona": {
+            "chars": evolution.persona_chars(),
+            "max_chars": MAX_PERSONA_CHARS,
+        },
+    }
+
+
+@app.get("/api/v1/admin/persona")
+async def persona_get() -> dict[str, Any]:
+    """读取人设卡正文（人设热加载：每次读文件，改完立刻生效）。"""
+    from evolution import MAX_PERSONA_CHARS
+
+    path = _persona_path()
+    text = ""
+    updated_at = None
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+            updated_at = datetime.datetime.fromtimestamp(
+                os.path.getmtime(path), datetime.timezone.utc
+            ).isoformat()
+        except OSError:
+            raise HTTPException(status_code=500, detail="人设卡读取失败")
+
+    return {
+        "text": text,
+        "chars": len(text),
+        "max_chars": MAX_PERSONA_CHARS,
+        "path": path,
+        "updated_at": updated_at,
+        "will_compress_next_run": len(text) > MAX_PERSONA_CHARS,
+    }
+
+
+@app.post("/api/v1/admin/persona")
+async def persona_set(req: "PersonaRequest") -> dict[str, Any]:
+    """保存人设卡（先备份再原子替换，写坏了也不会留下半个文件）。"""
+    from evolution import MAX_PERSONA_CHARS
+
+    path = _persona_path()
+    text = req.text
+
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    # 覆盖前先留一份手工备份：演化每天只备份一次，手工改崩了还得靠它回滚
+    if os.path.exists(path):
+        try:
+            os.makedirs(_backups_dir(), exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            stem = os.path.splitext(os.path.basename(path))[0]
+            shutil.copyfile(path, os.path.join(_backups_dir(), stem + "_manual_" + stamp + ".txt"))
+        except OSError:
+            pass  # 备份失败不阻塞保存
+
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+        raise HTTPException(status_code=500, detail="人设卡写入失败")
+
+    return {
+        "ok": True,
+        "chars": len(text),
+        # 人设是每次读文件的，所以保存即生效，不需要重启
+        "hot_reloaded": True,
+        "will_compress_next_run": len(text) > MAX_PERSONA_CHARS,
     }
 
 

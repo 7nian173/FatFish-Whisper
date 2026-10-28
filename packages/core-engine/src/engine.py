@@ -391,6 +391,37 @@ def tone_band_of(score: int) -> str:
     return "high"
 
 
+def bands_meta() -> list[dict[str, Any]]:
+    """六段情绪带的机器可读元数据（**前端与文档的唯一真源**）。
+
+    为什么由后端算而不是让前端抄一份：之前 README 写四档、后端实现六档、
+    前端又硬编码第三套阈值，用户按文档调到 60 却拿到 L0，纯属自找 issue。
+
+    这里不写死边界，而是**从 ``TONE_BANDS`` 推导**：上界 +1 得到下一段的下界，
+    等级用 ``level_of(上界)`` 取，因此这份元数据与 ``level_of`` 在构造上就
+    不可能分叉（``tests/test_time_and_bands.py`` 另有全量断言兜底）。
+
+    Returns:
+        长度 6 的列表，每项 ``{"band", "label", "min", "max"}``，
+        ``band`` 是语气带键（crisis/deep_low/low/stable/up/high），
+        ``label`` 是等级（CRISIS/L2/L1/L0/P1/P2）。
+        **色值不在这里**：颜色属于设计系统，由前端按 band 键映射。
+    """
+    result: list[dict[str, Any]] = []
+    low = SCORE_MIN
+    for upper, tone in TONE_BANDS:
+        result.append(
+            {
+                "band": tone,
+                "label": level_of(upper),
+                "min": low,
+                "max": upper,
+            }
+        )
+        low = upper + 1
+    return result
+
+
 def affinity_tier(affinity: int) -> str:
     """好感度分档（与 prompt_builder 的分层边界保持一致）。"""
     if affinity < 30:

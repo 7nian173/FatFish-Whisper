@@ -3,333 +3,2054 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FatFish-Whisper 控制台</title>
-<!-- 版本钉死 + SRI：浮动版本（vue@3）意味着 CDN 一换内容，浏览器就会执行新代码。
-     SRI 让内容指纹对不上时直接拒绝执行。 -->
-<script src="https://cdn.tailwindcss.com/3.4.16"
-        integrity="sha384-mS5Uq7sE90lgbBDN8xgf34ibEgbZo4gB3tfLY40ZRle+M188BQw8onzNHg6GUZaA"
-        crossorigin="anonymous"></script>
+<title>FatFish-Whisper · 潜鱼潜语控制台</title>
+<meta name="color-scheme" content="dark">
+<!--
+  版本钉死 + SRI：浮动版本（vue@3）意味着 CDN 一换内容，浏览器就会执行新代码。
+  SRI 让内容指纹对不上时直接拒绝执行。
+  本页所有样式与布局都写在下方 <style> 里，类名全部是自定义的（card/kpi/pipe…），
+  不使用任何 Tailwind 工具类，因此**不再引入 Tailwind CDN**：
+  该 CDN 不返回 Access-Control-Allow-Origin，配合 crossorigin="anonymous"
+  会让浏览器每次加载都报 CORS 错误，而页面本就不依赖它。
+-->
 <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"
         integrity="sha384-W/1Fp/LgAYO/oTn9Gs+PbeWuMuq1eQCnUMPCeg8POmMYchhzxctjEqtbiCIxDOON"
         crossorigin="anonymous"></script>
 <style>
-  body {
-    background:
-      radial-gradient(1200px 600px at 10% -10%, #0e2a3a 0%, transparent 60%),
-      radial-gradient(900px 500px at 100% 0%, #10223b 0%, transparent 55%),
-      #060d14;
-  }
-  .card {
-    background: rgba(13, 26, 38, 0.72);
-    border: 1px solid rgba(94, 234, 212, 0.12);
-    backdrop-filter: blur(6px);
-  }
-  .glow { box-shadow: 0 0 24px rgba(45, 212, 191, 0.10) inset; }
-  .bar { transition: width .4s ease; }
-  input, textarea {
-    background: rgba(4, 12, 20, 0.85);
-    border: 1px solid rgba(148, 163, 184, 0.22);
-  }
-  input:focus, textarea:focus { outline: none; border-color: #2dd4bf; }
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-thumb { background: #1e3a4a; border-radius: 8px; }
+/* ============================================================
+   Design tokens · Deep Current（深流）v1.0.0
+   与 design-tokens-2026-10-26.json 一一对应
+   ============================================================ */
+:root{
+  /* base / surface */
+  --ffw-bg-abyss:#060d14;
+  --ffw-bg-grad-a:#0e2a3a;
+  --ffw-bg-grad-b:#10223b;
+  --ffw-surface-card:rgba(13,26,38,.72);
+  --ffw-surface-raised:rgba(18,34,48,.90);
+  --ffw-surface-sunken:rgba(4,12,20,.85);
+  --ffw-surface-hover:rgba(148,163,184,.08);
+  --ffw-surface-active:rgba(148,163,184,.14);
+
+  /* border */
+  --ffw-border-hairline:rgba(94,234,212,.12);
+  --ffw-border-subtle:rgba(148,163,184,.10);
+  --ffw-border-strong:rgba(148,163,184,.22);
+
+  /* text */
+  --ffw-text-1:#e2e8f0;
+  --ffw-text-2:#94a3b8;
+  --ffw-text-3:#64748b;
+  --ffw-text-inverse:#04121a;
+
+  /* brand = 交互与焦点 */
+  --ffw-brand:#2dd4bf;
+  --ffw-brand-strong:#5eead4;
+  --ffw-brand-tint:rgba(45,212,191,.12);
+  --ffw-brand-tint-2:rgba(45,212,191,.22);
+
+  /* band = 情绪六档（阈值与后端 level_of 严格对齐） */
+  --ffw-band-crisis:#e4798f;
+  --ffw-band-deep-low:#d9a07a;
+  --ffw-band-low:#e3c56b;
+  --ffw-band-stable:#8ca6b8;
+  --ffw-band-up:#5fd08a;
+  --ffw-band-high:#a78bfa;
+
+  /* semantic = 系统健康 */
+  --ffw-ok:#4ade80;
+  --ffw-warn:#fbbf24;
+  --ffw-danger:#f87171;
+
+  /* data */
+  --ffw-affinity:#7dd3fc;
+  --ffw-cat-track-b:#2dd4bf;
+  --ffw-cat-evolve:#818cf8;
+  --ffw-cat-ooc:#f0b775;
+  --ffw-cat-compress:#7dd3fc;
+  --ffw-cat-unknown:#64748b;
+
+  /* radius */
+  --ffw-radius-xs:4px;
+  --ffw-radius-sm:6px;
+  --ffw-radius-md:8px;
+  --ffw-radius-lg:12px;
+  --ffw-radius-xl:16px;
+  --ffw-radius-pill:999px;
+
+  /* elevation */
+  --ffw-shadow-e1:inset 0 1px 0 rgba(255,255,255,.03), 0 8px 24px -14px rgba(0,0,0,.70);
+  --ffw-shadow-e2:0 16px 40px -20px rgba(0,0,0,.85);
+  --ffw-shadow-e3:0 24px 60px -24px rgba(0,0,0,.95);
+  --ffw-glow:inset 0 0 24px rgba(45,212,191,.06);
+  --ffw-focus-ring:0 0 0 3px rgba(45,212,191,.18);
+  --ffw-focus-ring-danger:0 0 0 3px rgba(248,113,113,.18);
+
+  /* motion */
+  --ffw-dur-fast:120ms;
+  --ffw-dur-base:200ms;
+  --ffw-dur-slow:320ms;
+  --ffw-dur-emphasis:400ms;
+  --ffw-ease-std:cubic-bezier(.4,0,.2,1);
+  --ffw-ease-enter:cubic-bezier(.2,.8,.2,1);
+  --ffw-ease-exit:cubic-bezier(.4,0,1,1);
+
+  /* typography */
+  --ffw-font-ui:-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --ffw-font-mono:"JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+*,*::before,*::after{box-sizing:border-box}
+[v-cloak]{display:none}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;min-height:100vh;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, var(--ffw-bg-grad-a) 0%, transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, var(--ffw-bg-grad-b) 0%, transparent 55%),
+    var(--ffw-bg-abyss);
+  background-attachment:fixed;
+  color:var(--ffw-text-1);
+  font-family:var(--ffw-font-ui);
+  font-size:13px;line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+h1,h2,h3,p{margin:0}
+button{font-family:inherit}
+code{font-family:var(--ffw-font-mono);font-size:11px;padding:1px 4px;border-radius:var(--ffw-radius-xs);background:rgba(148,163,184,.12);color:var(--ffw-text-2)}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#1e3a4a;border-radius:8px}
+::-webkit-scrollbar-thumb:hover{background:#2a4f63}
+
+/* ============================================================ layout */
+.wrap{max-width:1320px;margin:0 auto;padding:0 20px 56px}
+.grid{display:grid;gap:16px}
+.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.grid-main{grid-template-columns:minmax(0,1.75fr) minmax(0,1fr)}
+.grid-sys{grid-template-columns:minmax(0,1fr) minmax(0,1.4fr)}
+@media (max-width:1180px){
+  .grid-4{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .grid-main,.grid-sys{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:760px){
+  .grid-4,.grid-2{grid-template-columns:minmax(0,1fr)}
+  .wrap{padding:0 14px 40px}
+}
+.stack-v{display:flex;flex-direction:column;gap:16px}
+.row{display:flex;align-items:center;gap:8px}
+.row-end{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.spread{display:flex;align-items:center;justify-content:space-between;gap:12px}
+
+/* ============================================================ topbar */
+.topbar{
+  position:sticky;top:0;z-index:10;
+  background:rgba(6,13,20,.82);
+  border-bottom:1px solid var(--ffw-border-hairline);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+}
+.topbar-in{max-width:1320px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand-mark{font-size:20px;line-height:1}
+.brand-name{font-size:14px;font-weight:600;letter-spacing:-.01em;color:var(--ffw-brand-strong);white-space:nowrap}
+.brand-sub{font-size:11px;color:var(--ffw-text-3);white-space:nowrap}
+.topbar-right{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+@media (max-width:760px){
+  .topbar-in{padding:8px 14px}
+  .brand-sub{display:none}
+}
+
+/* health light */
+.health{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--ffw-text-2);white-space:nowrap}
+.health-lat{font-size:11px;color:var(--ffw-text-3);font-variant-numeric:tabular-nums}
+.light{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:#475569;box-shadow:0 0 0 3px rgba(148,163,184,.10)}
+.light--ok{background:var(--ffw-ok);box-shadow:0 0 0 3px rgba(74,222,128,.14)}
+.light--warn{background:var(--ffw-warn);box-shadow:0 0 0 3px rgba(251,191,36,.14)}
+.light--down{background:var(--ffw-danger);box-shadow:0 0 0 3px rgba(248,113,113,.14)}
+.light--unknown{background:#475569;box-shadow:0 0 0 3px rgba(148,163,184,.10)}
+.light.is-flash{animation:flashOnce var(--ffw-dur-emphasis) var(--ffw-ease-std)}
+@keyframes flashOnce{0%{transform:scale(1.7)}100%{transform:scale(1)}}
+
+/* switch */
+.switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:12px;color:var(--ffw-text-2);white-space:nowrap}
+.switch input{position:absolute;opacity:0;width:0;height:0}
+.switch .track{width:30px;height:16px;border-radius:var(--ffw-radius-pill);background:rgba(148,163,184,.22);position:relative;transition:background var(--ffw-dur-base) var(--ffw-ease-std);flex:0 0 auto}
+.switch .track::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#94a3b8;transition:transform var(--ffw-dur-base) var(--ffw-ease-enter),background var(--ffw-dur-base)}
+.switch input:checked + .track{background:rgba(45,212,191,.32)}
+.switch input:checked + .track::after{transform:translateX(14px);background:var(--ffw-brand-strong)}
+.switch input:focus-visible + .track{box-shadow:var(--ffw-focus-ring)}
+
+/* segmented */
+.seg{display:inline-flex;padding:2px;gap:2px;border-radius:var(--ffw-radius-md);background:rgba(4,12,20,.7);border:1px solid var(--ffw-border-strong)}
+.seg > button{height:24px;padding:0 10px;border:0;background:transparent;color:var(--ffw-text-3);font-size:11px;font-weight:500;border-radius:5px;cursor:pointer;transition:color var(--ffw-dur-fast) var(--ffw-ease-std),background var(--ffw-dur-fast) var(--ffw-ease-std)}
+.seg > button:hover{color:var(--ffw-text-1)}
+.seg > button.is-on{background:var(--ffw-brand-tint-2);color:var(--ffw-brand-strong)}
+.seg > button:focus-visible{outline:none;box-shadow:var(--ffw-focus-ring)}
+
+/* ============================================================ card */
+.card{
+  position:relative;
+  background:var(--ffw-surface-card);
+  border:1px solid var(--ffw-border-hairline);
+  border-radius:var(--ffw-radius-xl);
+  box-shadow:var(--ffw-shadow-e1), var(--ffw-glow);
+  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  overflow:hidden;
+}
+.card-hd{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--ffw-border-subtle);flex-wrap:wrap}
+.card-bd{padding:16px 18px}
+.card-bd--flush{padding:0}
+.card-title{font-size:14px;font-weight:600;letter-spacing:-.01em;color:var(--ffw-text-1);display:flex;align-items:center;gap:8px}
+.card-sub{font-size:11px;color:var(--ffw-text-3);margin-top:2px}
+.hd-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* ============================================================ section heading */
+.sec-hd{display:flex;align-items:center;gap:10px;margin:26px 0 12px}
+.sec-hd h2{font-size:11px;font-weight:600;color:var(--ffw-text-3);letter-spacing:.14em;text-transform:uppercase}
+.sec-hd::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--ffw-border-subtle),transparent)}
+
+/* ============================================================ badge */
+.badge{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:var(--ffw-radius-pill);font-size:11px;font-weight:500;line-height:1;white-space:nowrap;border:1px solid transparent;letter-spacing:.01em}
+.badge--crisis{color:var(--ffw-band-crisis);background:rgba(228,121,143,.13);border-color:rgba(228,121,143,.28)}
+.badge--deep-low{color:var(--ffw-band-deep-low);background:rgba(217,160,122,.13);border-color:rgba(217,160,122,.28)}
+.badge--low{color:var(--ffw-band-low);background:rgba(227,197,107,.13);border-color:rgba(227,197,107,.28)}
+.badge--stable{color:var(--ffw-band-stable);background:rgba(140,166,184,.13);border-color:rgba(140,166,184,.28)}
+.badge--up{color:var(--ffw-band-up);background:rgba(95,208,138,.13);border-color:rgba(95,208,138,.28)}
+.badge--high{color:var(--ffw-band-high);background:rgba(167,139,250,.13);border-color:rgba(167,139,250,.28)}
+.badge--neutral{color:var(--ffw-text-2);background:rgba(148,163,184,.10);border-color:rgba(148,163,184,.20)}
+.badge--brand{color:var(--ffw-brand-strong);background:var(--ffw-brand-tint);border-color:rgba(45,212,191,.30)}
+.badge--warn{color:var(--ffw-warn);background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.28)}
+.tag-warn{font-size:10px;font-weight:500;color:var(--ffw-warn);background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.28);border-radius:var(--ffw-radius-xs);padding:1px 5px;letter-spacing:.02em}
+
+/* ============================================================ bars */
+.bar{position:relative;height:6px;border-radius:var(--ffw-radius-pill);background:rgba(148,163,184,.14);overflow:hidden;flex:1;min-width:0;color:var(--ffw-text-2)}
+.bar > i{display:block;height:100%;border-radius:var(--ffw-radius-pill);background:currentColor;transition:width var(--ffw-dur-slow) var(--ffw-ease-enter)}
+.bar .tick{position:absolute;top:0;bottom:0;width:1px;background:rgba(6,13,20,.65);z-index:2}
+.bar--lg{height:8px}
+
+/* ============================================================ buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 12px;border-radius:var(--ffw-radius-md);font-size:12px;font-weight:500;border:1px solid var(--ffw-border-strong);background:rgba(148,163,184,.08);color:var(--ffw-text-2);cursor:pointer;white-space:nowrap;transition:background var(--ffw-dur-fast) var(--ffw-ease-std),border-color var(--ffw-dur-fast) var(--ffw-ease-std),color var(--ffw-dur-fast) var(--ffw-ease-std),transform var(--ffw-dur-fast) var(--ffw-ease-std)}
+.btn:hover{background:var(--ffw-surface-active);color:var(--ffw-text-1)}
+.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:none;box-shadow:var(--ffw-focus-ring)}
+.btn--primary{background:var(--ffw-brand-tint);border-color:rgba(45,212,191,.32);color:var(--ffw-brand-strong)}
+.btn--primary:hover{background:var(--ffw-brand-tint-2);color:#a7f3e4}
+.btn--danger{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.32);color:#fca5a5}
+.btn--danger:hover{background:rgba(248,113,113,.20);color:#fecaca}
+.btn--danger:focus-visible{box-shadow:var(--ffw-focus-ring-danger)}
+.btn--sm{height:26px;padding:0 10px;font-size:11px}
+.btn--block{width:100%;margin-top:14px}
+.btn[disabled]{opacity:.42;cursor:not-allowed;transform:none}
+
+/* ============================================================ form */
+.field-label{display:block;font-size:11px;font-weight:500;color:var(--ffw-text-3);margin:0 0 6px;letter-spacing:.02em}
+.field-label:not(:first-child){margin-top:12px}
+.input,.textarea{
+  width:100%;background:var(--ffw-surface-sunken);border:1px solid var(--ffw-border-strong);
+  border-radius:var(--ffw-radius-sm);color:var(--ffw-text-1);font-size:13px;padding:7px 10px;
+  transition:border-color var(--ffw-dur-fast) var(--ffw-ease-std),box-shadow var(--ffw-dur-fast) var(--ffw-ease-std);
+}
+.input::placeholder,.textarea::placeholder{color:#4b5f72}
+.input:focus,.textarea:focus{outline:none;border-color:var(--ffw-brand);box-shadow:0 0 0 3px rgba(45,212,191,.14)}
+.input--sm{height:28px;padding:0 9px;font-size:12px;width:auto}
+.textarea{resize:vertical;line-height:1.6}
+.textarea.mono{font-family:var(--ffw-font-mono);font-size:12px;line-height:1.7}
+.input.mono{font-family:var(--ffw-font-mono);font-size:12px}
+.help{font-size:11px;line-height:1.65;color:var(--ffw-text-3);margin-top:12px}
+.counter{font-size:11px;font-variant-numeric:tabular-nums;color:var(--ffw-text-3);padding:2px 8px;border-radius:var(--ffw-radius-pill);border:1px solid var(--ffw-border-subtle)}
+.counter.is-over{color:var(--ffw-warn);border-color:rgba(251,191,36,.32);background:rgba(251,191,36,.10)}
+
+/* ============================================================ notice */
+.notice{font-size:11px;line-height:1.65;padding:8px 10px;border-radius:var(--ffw-radius-sm);border:1px solid transparent;margin-bottom:12px}
+.notice--warn{color:#fcd34d;background:rgba(251,191,36,.07);border-color:rgba(251,191,36,.22)}
+.notice--danger{color:#fca5a5;background:rgba(248,113,113,.07);border-color:rgba(248,113,113,.24);margin-top:10px;margin-bottom:0}
+.notice--info{color:var(--ffw-text-2);background:rgba(148,163,184,.06);border-color:var(--ffw-border-subtle)}
+
+/* ============================================================ banner */
+.banner{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-radius:var(--ffw-radius-lg);font-size:12px;line-height:1.6;margin-top:16px;border:1px solid rgba(251,191,36,.26);background:rgba(251,191,36,.07);color:#fcd34d;animation:fadeIn var(--ffw-dur-base) var(--ffw-ease-std)}
+.banner .banner-txt{flex:1;min-width:0}
+.banner strong{font-weight:600}
+
+/* ============================================================ kpi */
+.kpi{display:flex;flex-direction:column;gap:4px;padding:14px 16px;min-height:104px}
+.kpi-k{font-size:11px;color:var(--ffw-text-3);letter-spacing:.02em;display:flex;align-items:center;gap:6px}
+.kpi-v{font-size:30px;line-height:1.15;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums;color:var(--ffw-text-1);display:flex;align-items:baseline;gap:4px;margin-top:2px}
+.kpi-u{font-size:12px;font-weight:400;color:var(--ffw-text-3);letter-spacing:0}
+.kpi-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto;padding-top:6px}
+.kpi-note{font-size:11px;color:var(--ffw-text-3)}
+.spark{width:64px;height:22px;flex:0 0 auto;color:var(--ffw-brand);opacity:.85}
+.traits{display:flex;gap:10px;margin-top:8px}
+.trait{flex:1;min-width:0}
+.trait-k{font-size:10px;color:var(--ffw-text-3);margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.trait .bar{height:4px;color:var(--ffw-band-stable)}
+
+/* ============================================================ chart */
+.plot{position:relative;height:240px;margin:0 40px 0 58px}
+.plot svg{position:absolute;inset:0;width:100%;height:100%;display:block;overflow:visible}
+.plot-yaxis{position:absolute;left:100%;top:0;bottom:0;width:40px;pointer-events:none}
+.plot-yaxis span{position:absolute;left:7px;transform:translateY(-50%);font-size:10px;color:var(--ffw-text-3);font-variant-numeric:tabular-nums}
+.plot-bands{position:absolute;right:100%;top:0;bottom:0;width:58px;pointer-events:none}
+.plot-bands span{position:absolute;right:8px;transform:translateY(-50%);font-size:10px;letter-spacing:.02em;white-space:nowrap;opacity:.85}
+.plot-tip{position:absolute;transform:translateX(-50%);background:var(--ffw-surface-raised);border:1px solid var(--ffw-border-strong);border-radius:var(--ffw-radius-md);padding:7px 10px;font-size:11px;line-height:1.7;box-shadow:var(--ffw-shadow-e2);pointer-events:none;white-space:nowrap;z-index:3}
+.plot-dot{position:absolute;width:8px;height:8px;border-radius:50%;transform:translate(-50%,-50%);border:1.5px solid #060d14;pointer-events:none;z-index:2}
+.plot-tip b{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ffw-text-1)}
+.legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.legend-item{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ffw-text-2)}
+.legend-swatch{width:14px;height:0;border-top:2px solid currentColor;border-radius:2px}
+.legend-swatch.is-dash{border-top-style:dashed}
+.legend-swatch.is-area{height:8px;border-top:0;background:rgba(140,166,184,.22);border-radius:2px}
+@media (max-width:760px){.plot{height:180px;margin:0 32px 0 44px}.plot-bands{width:44px}.plot-yaxis{width:32px}}
+
+/* ============================================================ distribution */
+.dist{display:flex;flex-direction:column;gap:9px}
+.dist-row{display:grid;grid-template-columns:52px 52px minmax(0,1fr) 22px 36px;align-items:center;gap:8px}
+.dist-name{font-size:11px;font-weight:500;letter-spacing:.02em}
+.dist-range{font-size:10px;color:var(--ffw-text-3);font-variant-numeric:tabular-nums}
+.dist-num{font-size:12px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ffw-text-1)}
+.dist-pct{font-size:10px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ffw-text-3)}
+@media (max-width:400px){.dist-row{grid-template-columns:44px 44px minmax(0,1fr) 20px}}
+
+/* ============================================================ table */
+.tbl{display:flex;flex-direction:column}
+.tbl-hd,.urow{display:grid;grid-template-columns:170px minmax(0,1fr) minmax(0,1fr) 72px 92px;align-items:center;gap:16px;padding:0 18px}
+.tbl-hd{height:30px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ffw-text-3);border-bottom:1px solid var(--ffw-border-subtle)}
+.urow{height:42px;border-bottom:1px solid rgba(148,163,184,.06);cursor:pointer;transition:background var(--ffw-dur-fast) var(--ffw-ease-std)}
+.urow:hover{background:var(--ffw-surface-hover)}
+.urow.is-open{background:var(--ffw-surface-hover)}
+.urow:focus-visible{outline:none;box-shadow:inset 0 0 0 2px rgba(45,212,191,.35)}
+.uid{font-family:var(--ffw-font-mono);font-size:12px;color:var(--ffw-text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.metric{display:flex;align-items:center;gap:8px;min-width:0}
+.metric-v{font-size:11px;font-variant-numeric:tabular-nums;color:var(--ffw-text-2);width:30px;text-align:right;flex:0 0 auto}
+.rel{font-size:11px;color:var(--ffw-text-3);text-align:right;font-variant-numeric:tabular-nums}
+.udetail{padding:14px 18px 16px;background:rgba(4,12,20,.35);border-bottom:1px solid rgba(148,163,184,.06);animation:fadeIn var(--ffw-dur-base) var(--ffw-ease-std)}
+.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.dcell-k{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ffw-text-3);margin-bottom:3px}
+.dcell-v{font-size:13px;color:var(--ffw-text-1);font-variant-numeric:tabular-nums}
+.dcell-v small{font-size:11px;color:var(--ffw-text-3);margin-left:4px}
+@media (max-width:900px){
+  .tbl-hd{display:none}
+  .urow{grid-template-columns:minmax(0,1fr);height:auto;padding:10px 16px;gap:8px}
+  .rel{text-align:left}
+  .udetail{padding:12px 16px 16px}
+}
+
+/* ============================================================ pipeline */
+.pipe{display:flex;align-items:flex-start;overflow-x:auto;padding:4px 0 8px;margin:0 -4px}
+.pipe-step{flex:1 0 96px;display:flex;flex-direction:column;align-items:center;gap:5px;text-align:center;padding:0 2px;min-width:0}
+.pipe-node{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;border:1px solid var(--ffw-border-strong);background:rgba(148,163,184,.08);color:var(--ffw-text-3);transition:border-color var(--ffw-dur-base) var(--ffw-ease-std),background var(--ffw-dur-base) var(--ffw-ease-std),color var(--ffw-dur-base) var(--ffw-ease-std),box-shadow var(--ffw-dur-base) var(--ffw-ease-std)}
+.pipe-name{font-size:11px;font-weight:500;color:var(--ffw-text-3);white-space:nowrap}
+.pipe-note{font-size:10px;color:var(--ffw-text-3);line-height:1.4;opacity:.85;word-break:break-word}
+.pipe-step.is-pass .pipe-node{border-color:rgba(148,163,184,.38);background:rgba(148,163,184,.13);color:var(--ffw-text-1)}
+.pipe-step.is-pass .pipe-name{color:var(--ffw-text-2)}
+.pipe-step.is-skip .pipe-node{border-style:dashed;opacity:.55}
+.pipe-step.is-fail .pipe-node{border-color:rgba(248,113,113,.5);background:rgba(248,113,113,.14);color:#fca5a5}
+.pipe-step.is-fail .pipe-name{color:#fca5a5}
+.pipe-step.is-focus .pipe-node{border-color:var(--ffw-brand);background:var(--ffw-brand-tint-2);color:var(--ffw-brand-strong);box-shadow:0 0 0 4px rgba(45,212,191,.10);opacity:1}
+.pipe-step.is-focus .pipe-name{color:var(--ffw-brand-strong)}
+.pipe-link{flex:0 0 16px;height:1px;margin-top:13px;background:rgba(148,163,184,.28)}
+.pipe-link.is-dash{background:repeating-linear-gradient(90deg,rgba(148,163,184,.32) 0 4px,transparent 4px 8px)}
+@media (max-width:900px){.pipe-step{flex:0 0 84px}}
+
+/* judge panel */
+.judge{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:14px}
+.jbox{border:1px solid var(--ffw-border-subtle);border-radius:var(--ffw-radius-lg);padding:11px 12px;background:rgba(4,12,20,.32)}
+.jbox-k{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ffw-text-3);margin-bottom:7px;display:flex;align-items:center;justify-content:space-between;gap:6px}
+.jbox-v{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em;color:var(--ffw-text-1);line-height:1.2}
+.jbox-v small{font-size:11px;font-weight:400;color:var(--ffw-text-3);margin-left:3px}
+.jbox .bar{margin-top:8px}
+.jbox-note{font-size:10px;color:var(--ffw-text-3);margin-top:7px;line-height:1.5}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:2px;min-height:20px}
+.chip{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:var(--ffw-radius-xs);font-size:11px;font-family:var(--ffw-font-mono);border:1px solid transparent;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip--pos{color:var(--ffw-band-up);background:rgba(95,208,138,.12);border-color:rgba(95,208,138,.24)}
+.chip--neg{color:var(--ffw-band-crisis);background:rgba(228,121,143,.12);border-color:rgba(228,121,143,.24)}
+.chip--neutral{color:var(--ffw-text-2);background:rgba(148,163,184,.10);border-color:rgba(148,163,184,.20)}
+.metaline{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:14px;padding-top:12px;border-top:1px solid var(--ffw-border-subtle)}
+.metaline span{font-size:11px;color:var(--ffw-text-3)}
+.metaline b{font-family:var(--ffw-font-mono);font-size:11px;font-weight:400;color:var(--ffw-text-2)}
+.inneros{margin-top:14px;border-left:2px solid var(--ffw-brand-tint-2);padding:2px 0 2px 12px}
+.inneros-k{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ffw-text-3);margin-bottom:4px}
+.inneros-v{font-size:13px;line-height:1.7;color:rgba(153,246,228,.82)}
+
+/* chat bar */
+.chatbar{display:grid;grid-template-columns:130px minmax(0,1fr) auto;gap:8px;margin-top:16px}
+@media (max-width:760px){.chatbar{grid-template-columns:minmax(0,1fr) auto}.chatbar .input:first-child{grid-column:1/-1}}
+
+/* ============================================================ memory */
+.mem{display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:var(--ffw-radius-lg);border:1px solid var(--ffw-border-subtle);background:rgba(4,12,20,.28);margin-bottom:8px;transition:border-color var(--ffw-dur-base) var(--ffw-ease-std),background var(--ffw-dur-base) var(--ffw-ease-std)}
+.mem.is-active{border-color:rgba(45,212,191,.34);background:rgba(45,212,191,.06)}
+.mem-txt{flex:1;min-width:0}
+.mem-name{font-size:12px;font-weight:500;color:var(--ffw-text-1);display:flex;align-items:center;gap:6px}
+.mem-key{font-family:var(--ffw-font-mono);font-size:10px;color:var(--ffw-text-3);font-weight:400}
+.mem-note{font-size:10px;color:var(--ffw-text-3);margin-top:1px}
+
+/* ============================================================ token */
+.tok-total{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.02em;color:var(--ffw-text-1);display:flex;align-items:baseline;gap:4px;margin-bottom:12px}
+.stack{display:flex;height:10px;border-radius:var(--ffw-radius-pill);overflow:hidden;background:rgba(148,163,184,.10);gap:2px}
+.stack > span{display:block;transition:width var(--ffw-dur-slow) var(--ffw-ease-enter);min-width:2px}
+.legend-list{display:flex;flex-direction:column;gap:6px;margin-top:14px}
+.lg-row{display:grid;grid-template-columns:10px minmax(0,1fr) 62px 38px;align-items:center;gap:8px}
+.lg-dot{width:8px;height:8px;border-radius:2px}
+.lg-name{font-size:11px;color:var(--ffw-text-2);font-family:var(--ffw-font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lg-val{font-size:11px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ffw-text-1)}
+.lg-pct{font-size:10px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ffw-text-3)}
+
+/* ============================================================ timeline */
+.tl{display:flex;align-items:flex-start;overflow-x:auto;padding:2px 0 4px}
+.tl-step{flex:1 0 150px;display:flex;flex-direction:column;gap:6px;padding-right:12px;position:relative;min-width:0}
+.tl-step::before{content:"";position:absolute;left:22px;right:0;top:11px;height:1px;background:rgba(148,163,184,.20)}
+.tl-step:last-child::before{display:none}
+.tl-node{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;border:1px solid var(--ffw-border-strong);background:rgba(148,163,184,.10);color:var(--ffw-text-2);position:relative;z-index:1}
+.tl-step.is-done .tl-node{border-color:rgba(74,222,128,.42);background:rgba(74,222,128,.12);color:var(--ffw-ok)}
+.tl-step.is-skip .tl-node{border-style:dashed;color:var(--ffw-text-3)}
+.tl-step.is-unknown .tl-node{border-style:dashed;color:var(--ffw-text-3);opacity:.7}
+.tl-name{font-size:11px;font-weight:500;color:var(--ffw-text-2)}
+.tl-note{font-size:10px;color:var(--ffw-text-3);line-height:1.5}
+
+/* ============================================================ empty / skeleton */
+.empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:28px 16px;border:1px dashed rgba(148,163,184,.18);border-radius:var(--ffw-radius-lg);color:var(--ffw-text-3);font-size:12px;text-align:center;line-height:1.7}
+.empty strong{color:var(--ffw-text-2);font-weight:500}
+.skel{background:rgba(148,163,184,.09);border-radius:var(--ffw-radius-sm)}
+.skel-list{display:flex;flex-direction:column;gap:8px;padding:16px 18px}
+.skel-row{display:grid;grid-template-columns:170px minmax(0,1fr) minmax(0,1fr) 72px;gap:16px;align-items:center}
+.skel-loading{font-size:11px;color:var(--ffw-text-3);display:flex;align-items:center;gap:6px;padding:8px 0}
+
+/* ============================================================ toast */
+.toasts{position:fixed;right:18px;bottom:18px;z-index:60;display:flex;flex-direction:column;gap:8px;max-width:340px}
+.toast{display:flex;gap:9px;align-items:flex-start;padding:10px 12px;border-radius:var(--ffw-radius-lg);background:var(--ffw-surface-raised);border:1px solid var(--ffw-border-strong);box-shadow:var(--ffw-shadow-e2);font-size:12px;line-height:1.6;color:var(--ffw-text-1);animation:toastIn var(--ffw-dur-base) var(--ffw-ease-enter);border-left-width:3px}
+.toast--ok{border-left-color:var(--ffw-ok)}
+.toast--warn{border-left-color:var(--ffw-warn)}
+.toast--danger{border-left-color:var(--ffw-danger)}
+.toast--info{border-left-color:var(--ffw-brand)}
+@keyframes toastIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+
+/* ============================================================ modal */
+.modal-mask{position:fixed;inset:0;z-index:50;background:rgba(3,8,13,.72);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn var(--ffw-dur-base) var(--ffw-ease-std)}
+.modal{width:100%;max-width:420px;background:var(--ffw-surface-raised);border:1px solid var(--ffw-border-strong);border-radius:var(--ffw-radius-xl);padding:20px;box-shadow:var(--ffw-shadow-e3);animation:modalIn var(--ffw-dur-base) var(--ffw-ease-enter)}
+@keyframes modalIn{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
+.modal-title{font-size:14px;font-weight:600;margin-bottom:8px;color:var(--ffw-text-1)}
+.modal-body{font-size:12px;line-height:1.7;color:var(--ffw-text-2)}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+
+/* ============================================================ footer */
+.foot{font-size:11px;color:var(--ffw-text-3);text-align:center;padding:28px 0 4px;line-height:1.8}
+.foot code{font-size:10px}
+
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}
+}
 </style>
 </head>
-<body class="min-h-screen text-slate-200 antialiased">
-<div id="app" class="max-w-6xl mx-auto px-5 py-7 space-y-6">
+<body>
 
-  <!-- 顶部 -->
-  <header class="flex flex-wrap items-end justify-between gap-4">
-    <div>
-      <h1 class="text-2xl font-semibold tracking-tight">
-        <span class="text-teal-300">🐳 FatFish-Whisper</span>
-        <span class="text-slate-400 text-base font-normal">潜鱼潜语 · 情绪机控制台</span>
-      </h1>
-      <p class="text-sm text-slate-500 mt-1">双轨判定 · 内心 OS · 状态落库（SQLite）</p>
-    </div>
-    <div class="flex items-center gap-3 text-sm">
-      <span class="flex items-center gap-2">
-        <span class="w-2.5 h-2.5 rounded-full"
-              :class="health === 'ok' ? 'bg-teal-400' : (health === 'unknown' ? 'bg-slate-500' : 'bg-rose-500')"></span>
-        <span class="text-slate-400">{{ health === 'ok' ? '引擎在线' : (health === 'unknown' ? '检测中' : '引擎异常') }}</span>
-      </span>
-      <label class="flex items-center gap-1.5 text-slate-400 select-none">
-        <input type="checkbox" v-model="auto" class="align-middle accent-teal-400">
-        自动刷新
-      </label>
+<div id="app" v-cloak>
+
+  <!-- ═══════════════════════════ 顶栏 ═══════════════════════════ -->
+  <header class="topbar">
+    <div class="topbar-in">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">🐳</span>
+        <div>
+          <div class="brand-name">FatFish-Whisper</div>
+          <div class="brand-sub">潜鱼潜语 · 情绪机控制台</div>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <span class="health">
+          <span class="light" :class="['light--' + healthState, flash ? 'is-flash' : '']" aria-hidden="true"></span>
+          <span>{{ healthText }}</span>
+          <span class="health-lat" v-if="latency !== null">· {{ latency }}ms</span>
+        </span>
+
+        <label class="switch">
+          <input type="checkbox" v-model="auto">
+          <span class="track"></span>
+          <span>自动刷新</span>
+        </label>
+
+        <div class="seg" role="group" aria-label="时间范围">
+          <button v-for="r in ranges" :key="r.key"
+                  :class="{ 'is-on': range === r.key }"
+                  @click="range = r.key">{{ r.label }}</button>
+        </div>
+      </div>
     </div>
   </header>
 
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+  <main class="wrap">
 
-    <!-- 状态看板 -->
-    <section class="card glow rounded-2xl p-5 lg:col-span-2">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="font-medium text-slate-100">📊 状态看板</h2>
-        <div class="flex items-center gap-2">
-          <input v-model="filter" placeholder="按 user_id 过滤" class="text-xs rounded-lg px-3 py-1.5 w-40 text-slate-200">
-          <button @click="refresh" class="text-xs rounded-lg px-3 py-1.5 bg-teal-500/15 text-teal-300 hover:bg-teal-500/25">
-            刷新
+    <!-- 数据源横幅 -->
+    <div class="banner" v-if="source === 'demo'">
+      <span aria-hidden="true">⚠</span>
+      <div class="banner-txt">
+        <strong>演示数据</strong> —— 未检测到引擎（<code>http://127.0.0.1:8000</code>）。
+        以下全部为内置样例，用于展示完整形态；数值不代表真实状态。
+        启动 <code>start.bat</code> 后点右侧按钮即可切回实时数据。
+      </div>
+      <button class="btn btn--sm" @click="connect">重试连接</button>
+    </div>
+    <div class="banner" v-else-if="source === 'connecting'" style="border-color:rgba(148,163,184,.22);background:rgba(148,163,184,.06);color:var(--ffw-text-2)">
+      <span aria-hidden="true">◌</span>
+      <div class="banner-txt">正在探测引擎…</div>
+    </div>
+
+    <!-- ═══════════════════════════ 概览 ═══════════════════════════ -->
+    <div class="sec-hd"><h2>概览</h2></div>
+
+    <section class="grid grid-4">
+
+      <!-- 在线用户 -->
+      <div class="card kpi">
+        <div class="kpi-k">在线用户</div>
+        <div class="kpi-v">
+          <anim-num :value="kpis.users"></anim-num><span class="kpi-u">人</span>
+        </div>
+        <div class="kpi-foot">
+          <span class="kpi-note">{{ kpis.usersNote }}</span>
+        </div>
+      </div>
+
+      <!-- 平均情绪 -->
+      <div class="card kpi">
+        <div class="kpi-k">平均情绪</div>
+        <div class="kpi-v">
+          <anim-num :value="kpis.avgEmotion"></anim-num><span class="kpi-u">/ 100</span>
+        </div>
+        <div class="kpi-foot">
+          <span class="badge" :class="'badge--' + bandKey(kpis.avgEmotion)">{{ bandLabel(kpis.avgEmotion) }}</span>
+          <svg class="spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+            <polyline :points="kpis.spark" fill="none" stroke="currentColor" stroke-width="1.5"
+                      vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Bot 心情 -->
+      <div class="card kpi">
+        <div class="kpi-k">Bot 自身心情</div>
+        <div class="kpi-v" :style="{ color: bandColor(botMood.emotion) }">
+          <anim-num :value="botMood.emotion || 0"></anim-num>
+          <span class="kpi-u">/ 100</span>
+        </div>
+        <div class="traits" v-if="traits">
+          <div class="trait" v-for="t in traitList" :key="t.key">
+            <div class="trait-k" :title="t.hint">{{ t.label }}</div>
+            <div class="bar"><i :style="{ width: (t.value * 100) + '%' }"></i></div>
+          </div>
+        </div>
+        <div class="kpi-foot" v-else>
+          <span class="kpi-note">性格向量未返回</span>
+        </div>
+      </div>
+
+      <!-- 今日 Token -->
+      <div class="card kpi">
+        <div class="kpi-k">今日 Token</div>
+        <div class="kpi-v">
+          <anim-num :value="tokenTotal.total_tokens || 0"></anim-num>
+        </div>
+        <div class="kpi-foot">
+          <span class="kpi-note">{{ tokenTotal.calls || 0 }} 次调用 · {{ tokenModulesCount }} 个模块</span>
+          <span class="badge badge--neutral">{{ tokenDay === todayStr ? '今天' : tokenDay }}</span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ═══════════════════════════ 趋势 + 分布 ═══════════════════════════ -->
+    <div class="sec-hd"><h2>情绪趋势</h2></div>
+
+    <section class="grid grid-main">
+
+      <!-- 趋势图 -->
+      <div class="card">
+        <div class="card-hd">
+          <div>
+            <div class="card-title">情绪与好感趋势</div>
+            <div class="card-sub">{{ trendMeta }}</div>
+          </div>
+          <div class="legend">
+            <span class="legend-item" style="color:#8ca6b8">
+              <span class="legend-swatch is-area"></span>平均情绪（六档着色）
+            </span>
+            <span class="legend-item" style="color:#7dd3fc">
+              <span class="legend-swatch is-dash"></span>平均好感
+            </span>
+          </div>
+        </div>
+        <div class="card-bd">
+          <div v-if="!series.length" class="empty">
+            <strong>还没有采样点</strong>
+            <span>每 {{ intervalSec }} 秒采样一次，稍等片刻就会出现曲线。</span>
+          </div>
+          <div v-else class="plot" ref="plot"
+               @mousemove="onPlotMove" @mouseleave="hover = null">
+            <svg viewBox="0 0 1000 100" preserveAspectRatio="none"
+                 role="img" :aria-label="trendAria">
+              <defs>
+                <linearGradient id="emoStroke" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+                  <stop v-for="(s, i) in emoStops" :key="'s' + i" :offset="s.offset" :stop-color="s.color"/>
+                </linearGradient>
+                <linearGradient id="emoFill" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+                  <stop offset="0" stop-color="#8ca6b8" stop-opacity=".16"/>
+                  <stop offset=".55" stop-color="#8ca6b8" stop-opacity=".06"/>
+                  <stop offset="1" stop-color="#8ca6b8" stop-opacity=".01"/>
+                </linearGradient>
+              </defs>
+
+              <!-- 六档背景带：y 值就是阈值本身 -->
+              <rect v-for="b in bands" :key="b.band" x="0" :y="100 - b.max" width="1000"
+                    :height="b.max - b.min" :fill="b.fill"/>
+
+              <path :d="emoArea" fill="url(#emoFill)"/>
+              <path :d="emoLine" fill="none" stroke="url(#emoStroke)" stroke-width="2"
+                    vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
+              <path :d="affLine" fill="none" stroke="#7dd3fc" stroke-width="1.5"
+                    stroke-dasharray="5 4" vector-effect="non-scaling-stroke" opacity=".75"/>
+
+              <line v-if="hover" :x1="hover.xSvg" :x2="hover.xSvg" y1="0" y2="100"
+                    stroke="rgba(226,232,240,.26)" stroke-width="1" vector-effect="non-scaling-stroke"/>
+            </svg>
+
+            <!-- 数据点用 HTML 画：SVG 被 preserveAspectRatio="none" 拉伸，圆会变椭圆 -->
+            <span v-if="hover" class="plot-dot"
+                  :style="{ left: hover.x + '%', top: hover.emoY + '%', background: bandColor(hover.emo) }"></span>
+
+            <div class="plot-bands" aria-hidden="true">
+              <span v-for="b in bands" :key="'bl' + b.band"
+                    :style="{ top: (100 - (b.min + b.max) / 2) + '%', color: b.fg }">{{ b.label }}</span>
+            </div>
+            <div class="plot-yaxis" aria-hidden="true">
+              <span v-for="t in yTicks" :key="'y' + t.v" :style="{ top: (100 - t.v) + '%' }">{{ t.v }}</span>
+            </div>
+
+            <div class="plot-tip" v-if="hover" :style="hover.tipStyle">
+              <div style="color:var(--ffw-text-3)">{{ hover.time }}</div>
+              <div>情绪 <b>{{ hover.emo }}</b> · <span :style="{ color: bandColor(hover.emo) }">{{ bandLabel(hover.emo) }}</span></div>
+              <div>好感 <b>{{ hover.aff }}</b> · 样本 {{ hover.n }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 等级分布 -->
+      <div class="card">
+        <div class="card-hd">
+          <div>
+            <div class="card-title">等级分布</div>
+            <div class="card-sub">{{ users.length }} 位用户 · 六段阈值</div>
+          </div>
+        </div>
+        <div class="card-bd">
+          <div v-if="!users.length" class="empty">
+            <strong>还没有用户状态</strong>
+            <span>去「判定链路」发一句话，就会生成一条。</span>
+          </div>
+          <div v-else class="dist">
+            <div class="dist-row" v-for="d in distribution" :key="d.band">
+              <span class="dist-name" :style="{ color: d.fg }">{{ d.label }}</span>
+              <span class="dist-range">{{ d.range }}</span>
+              <div class="bar" :style="{ color: d.fg }"><i :style="{ width: d.width + '%' }"></i></div>
+              <span class="dist-num">{{ d.count }}</span>
+              <span class="dist-pct">{{ d.pct }}%</span>
+            </div>
+          </div>
+          <div class="help" v-if="users.length">
+            条形长度按「最多的那一档」归一化，右侧数字为真实人数与占比。
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ═══════════════════════════ 用户状态 ═══════════════════════════ -->
+    <div class="sec-hd"><h2>用户状态</h2></div>
+
+    <section class="card">
+      <div class="card-hd">
+        <div>
+          <div class="card-title">状态看板</div>
+          <div class="card-sub">{{ filteredUsers.length }} / {{ users.length }} 条 · 按最近更新排序 · 点击行展开详情</div>
+        </div>
+        <div class="hd-actions">
+          <input class="input input--sm" v-model="filter" placeholder="按 user_id 过滤" aria-label="按 user_id 过滤">
+          <button class="btn btn--sm" @click="refreshAll(true)">刷新</button>
+        </div>
+      </div>
+
+      <div class="card-bd card-bd--flush">
+        <!-- 加载骨架（静态，不做 shimmer） -->
+        <div v-if="stateLoading && !users.length" class="skel-list">
+          <div class="skel-row" v-for="i in 4" :key="'sk' + i">
+            <div class="skel" style="height:12px;width:80%"></div>
+            <div class="skel" style="height:6px"></div>
+            <div class="skel" style="height:6px"></div>
+            <div class="skel" style="height:18px;border-radius:999px"></div>
+          </div>
+          <div class="skel-loading">读取中…</div>
+        </div>
+
+        <div v-else-if="!users.length" class="card-bd">
+          <div class="empty">
+            <strong>还没有任何用户状态</strong>
+            <span>去下方「判定链路」发一句话，引擎就会为这个 user_id 建一条状态。</span>
+          </div>
+        </div>
+
+        <div v-else-if="!filteredUsers.length" class="card-bd">
+          <div class="empty">
+            <strong>没有匹配「{{ filter }}」的用户</strong>
+            <span>试试只输入 user_id 的前几位数字。</span>
+            <button class="btn btn--sm" @click="filter = ''">清除筛选</button>
+          </div>
+        </div>
+
+        <div v-else class="tbl" role="table" aria-label="用户情绪状态">
+          <div class="tbl-hd" role="row">
+            <span role="columnheader">user_id</span>
+            <span role="columnheader">情绪</span>
+            <span role="columnheader">好感</span>
+            <span role="columnheader">等级</span>
+            <span role="columnheader" style="text-align:right">最近更新</span>
+          </div>
+
+          <template v-for="u in filteredUsers" :key="u.user_id">
+            <div class="urow" role="row" tabindex="0"
+                 :class="{ 'is-open': expanded === u.user_id }"
+                 :aria-expanded="expanded === u.user_id ? 'true' : 'false'"
+                 @click="toggle(u.user_id)"
+                 @keydown.enter.prevent="toggle(u.user_id)"
+                 @keydown.space.prevent="toggle(u.user_id)">
+              <span class="uid" role="cell" :title="u.user_id">{{ u.user_id }}</span>
+
+              <div class="metric" role="cell">
+                <div class="bar bar--ticks" :style="{ color: bandColor(u.emotion) }">
+                  <i :style="{ width: clampPct(u.emotion) + '%' }"></i>
+                  <b class="tick" v-for="t in ticks" :key="'t' + t" :style="{ left: t + '%' }"></b>
+                </div>
+                <span class="metric-v">{{ u.emotion }}</span>
+              </div>
+
+              <div class="metric" role="cell">
+                <div class="bar" style="color:#7dd3fc">
+                  <i :style="{ width: clampPct(u.affinity / 2) + '%' }"></i>
+                </div>
+                <span class="metric-v">{{ u.affinity }}</span>
+              </div>
+
+              <span role="cell">
+                <span class="badge" :class="'badge--' + bandKey(u.emotion)">{{ u.level }}</span>
+              </span>
+
+              <span class="rel" role="cell">{{ rel(u.last_update) }}</span>
+            </div>
+
+            <div class="udetail" v-if="expanded === u.user_id">
+              <div class="detail-grid">
+                <div>
+                  <div class="dcell-k">档位区间</div>
+                  <div class="dcell-v">{{ bandRange(u.emotion) }}<small>{{ bandName(u.emotion) }}</small></div>
+                </div>
+                <div>
+                  <div class="dcell-k">好感分档</div>
+                  <div class="dcell-v">{{ affinityTier(u.affinity) }}<small>/ 200</small></div>
+                </div>
+                <div>
+                  <div class="dcell-k">与 Bot 心情差</div>
+                  <div class="dcell-v">{{ signed(u.emotion - (botMood.emotion || 0)) }}<small>Bot {{ botMood.emotion || 0 }}</small></div>
+                </div>
+                <div>
+                  <div class="dcell-k">最近更新</div>
+                  <div class="dcell-v" style="font-size:12px">{{ absTime(u.last_update) }}</div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════ 判定链路 ═══════════════════════════ -->
+    <div class="sec-hd"><h2>判定链路</h2></div>
+
+    <section class="card">
+      <div class="card-hd">
+        <div>
+          <div class="card-title">一次判定的完整路径</div>
+          <div class="card-sub">{{ pipeMeta }}</div>
+        </div>
+        <div class="hd-actions">
+          <span class="badge badge--neutral">{{ pathLabel }}</span>
+          <span class="badge" :class="trackB ? 'badge--brand' : 'badge--warn'">
+            Track B {{ trackB ? '已启用' : '未启用' }}
+          </span>
+        </div>
+      </div>
+
+      <div class="card-bd">
+        <div class="pipe" v-if="pipeSteps.length">
+          <template v-for="(s, i) in pipeSteps" :key="s.key">
+            <div class="pipe-step" :class="['is-' + s.state, { 'is-focus': s.focus }]">
+              <div class="pipe-node">{{ i + 1 }}</div>
+              <div class="pipe-name">{{ s.name }}</div>
+              <div class="pipe-note">{{ s.note }}</div>
+            </div>
+            <div v-if="i < pipeSteps.length - 1" class="pipe-link"
+                 :class="{ 'is-dash': s.state === 'skip' }"></div>
+          </template>
+        </div>
+
+        <div class="judge" v-if="pipeline">
+          <!-- 置信度 -->
+          <div class="jbox">
+            <div class="jbox-k"><span>Track A 置信度</span>
+              <span v-if="pipeline.debug.undefined" class="tag-warn">低于阈值</span>
+            </div>
+            <div class="jbox-v">{{ fmt(pipeline.debug.confidence, 2) }}<small>/ 1.00</small></div>
+            <div class="bar" :style="{ color: 'var(--ffw-band-stable)' }">
+              <i :style="{ width: clampPct((pipeline.debug.confidence || 0) * 100) + '%' }"></i>
+            </div>
+            <div class="jbox-note">{{ pipeline.debug.undefined ? '未达阈值 → 移交 Track B 仲裁' : '已达阈值 → 直接采用 Track A 结果' }}</div>
+          </div>
+
+          <!-- 命中词 -->
+          <div class="jbox">
+            <div class="jbox-k"><span>命中信号</span>
+              <span style="color:var(--ffw-text-3)">{{ hitCount }} 个</span>
+            </div>
+            <div class="chips">
+              <span v-for="h in hits.neg" :key="'n' + h" class="chip chip--neg">{{ h }}</span>
+              <span v-for="h in hits.pos" :key="'p' + h" class="chip chip--pos">{{ h }}</span>
+              <span v-if="!hitCount" class="chip chip--neutral">无命中</span>
+            </div>
+            <div class="jbox-note">绿=正向信号，红=负向信号。词典命中是 Track A 的唯一依据。</div>
+          </div>
+
+          <!-- 撤回掷骰 -->
+          <div class="jbox">
+            <div class="jbox-k"><span>撤回掷骰</span>
+              <span style="color:var(--ffw-text-3)">RecallRoller</span>
+            </div>
+            <div class="jbox-v" v-if="pipeline.recall_hint">
+              {{ fmt((pipeline.recall_hint.probability || 0) * 100, 0) }}<small>%</small>
+            </div>
+            <div class="jbox-v" v-else>—<small>不掷骰</small></div>
+            <div class="bar" style="color:#f0b775" v-if="pipeline.recall_hint">
+              <i :style="{ width: clampPct((pipeline.recall_hint.probability || 0) * 100) + '%' }"></i>
+            </div>
+            <div class="jbox-note">{{ pipeline.recall_hint ? pipeline.recall_hint.reason : '当前档位无撤回概率（仅 L1 / L2 / CRISIS 触发）' }}</div>
+          </div>
+
+          <!-- 情绪变化 -->
+          <div class="jbox">
+            <div class="jbox-k"><span>情绪变化</span>
+              <span :style="{ color: bandColor(pipeline.debug.emotion) }">{{ bandLabel(pipeline.debug.emotion) }}</span>
+            </div>
+            <div class="jbox-v">
+              {{ fmt(pipeline.debug.prev, 1) }} <span style="color:var(--ffw-text-3);font-weight:400">→</span> {{ pipeline.debug.emotion }}
+              <small :style="{ color: deltaColor(pipeline.debug.delta) }">{{ signed(pipeline.debug.delta, 1) }}</small>
+            </div>
+            <div class="bar bar--ticks" :style="{ color: bandColor(pipeline.debug.emotion) }">
+              <i :style="{ width: clampPct(pipeline.debug.emotion) + '%' }"></i>
+              <b class="tick" v-for="t in ticks" :key="'jt' + t" :style="{ left: t + '%' }"></b>
+            </div>
+            <div class="jbox-note">
+              α = {{ fmt(pipeline.debug.alpha, 2) }}
+              <span v-if="pipeline.debug.habituation"> · 习惯化 {{ pipeline.debug.habituation }} 次</span>
+              <span v-if="pipeline.debug.decayed"> · 已半衰期回归</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="metaline" v-if="pipeline">
+          <span>意图 <b>{{ pipeline.debug.intent_type || '—' }}</b></span>
+          <span>审核 <b>{{ pipeline.debug.audit || '—' }}</b></span>
+          <span>解禁概率 <b>{{ fmt(pipeline.debug.unlock_probability, 2) }}</b></span>
+          <span>记忆召回 <b>{{ pipeline.debug.memories || 0 }} 条</b></span>
+          <span>event_key <b>{{ pipeline.debug.event_key || '—' }}</b></span>
+          <span>判定理由 <b style="font-family:var(--ffw-font-ui);color:var(--ffw-text-2)">{{ pipeline.debug.reason || '—' }}</b></span>
+        </div>
+
+        <div class="inneros" v-if="pipeline && pipeline.inner_os">
+          <div class="inneros-k">内心 OS</div>
+          <div class="inneros-v">{{ pipeline.inner_os }}</div>
+        </div>
+
+        <div class="chatbar">
+          <input class="input mono" v-model="chat.userId" placeholder="user_id" aria-label="测试用 user_id">
+          <input class="input" v-model="chat.text" @keydown.enter="sendChat"
+                 placeholder="输入一句话，回车送检（走完整双轨判定）" aria-label="测试消息">
+          <button class="btn btn--primary" @click="sendChat"
+                  :disabled="chat.sending || !chat.text.trim()">
+            {{ chat.sending ? '送检中…' : '送检' }}
           </button>
         </div>
       </div>
+    </section>
 
-      <div v-if="stateLoading" class="text-sm text-slate-500 py-8 text-center">读取中…</div>
-      <div v-else-if="filteredUsers.length === 0" class="text-sm text-slate-500 py-8 text-center">
-        还没有任何用户状态。去下面「测试对话」发一句，就会生成一条。
+    <!-- ═══════════════════════════ 配置 ═══════════════════════════ -->
+    <div class="sec-hd"><h2>配置</h2></div>
+
+    <section class="grid grid-2">
+
+      <!-- LLM 参数 -->
+      <div class="card">
+        <div class="card-hd">
+          <div class="card-title">LLM 参数</div>
+          <span class="badge badge--neutral">.env</span>
+        </div>
+        <div class="card-bd">
+          <label class="field-label" for="cfg-base">API Base</label>
+          <input id="cfg-base" class="input" v-model="cfg.api_base" placeholder="https://api.deepseek.com/v1">
+
+          <label class="field-label" for="cfg-key">API Key</label>
+          <input id="cfg-key" class="input" v-model="cfg.api_key" type="password"
+                 :placeholder="cfg.keyMasked || 'sk-...'">
+
+          <label class="field-label" for="cfg-model">模型名称</label>
+          <input id="cfg-model" class="input" v-model="cfg.model" placeholder="deepseek-chat">
+
+          <button class="btn btn--primary btn--block" @click="saveConfig" :disabled="saving">
+            {{ saving ? '保存中…' : '保存到 .env' }}
+          </button>
+
+          <p class="help">
+            保存后写入 <code>packages/core-engine/.env</code>，并热更新 Track B。
+            Key 只回显脱敏值；留空的字段不会被覆盖。
+          </p>
+        </div>
       </div>
 
-      <div v-else class="space-y-2 max-h-[22rem] overflow-y-auto pr-1">
-        <div v-for="u in filteredUsers" :key="u.user_id"
-             class="rounded-xl border border-slate-700/40 bg-slate-900/30 px-3.5 py-2.5">
-          <div class="flex items-center justify-between text-sm">
-            <span class="font-mono text-slate-300 truncate mr-3">{{ u.user_id }}</span>
-            <span class="shrink-0 text-[11px] px-2 py-0.5 rounded-full"
-                  :class="levelClass(u.level)">{{ u.level }}</span>
+      <!-- 人设编辑 -->
+      <div class="card">
+        <div class="card-hd">
+          <div>
+            <div class="card-title">人设编辑</div>
+            <div class="card-sub">persona.txt · 保存即生效（每次读文件）</div>
           </div>
-          <div class="mt-2 flex items-center gap-2">
-            <span class="text-[11px] text-slate-500 w-8">情绪</span>
-            <div class="h-1.5 flex-1 rounded-full bg-slate-700/50 overflow-hidden">
-              <div class="bar h-full rounded-full" :class="barClass(u.emotion)" :style="{ width: u.emotion + '%' }"></div>
+          <span class="counter" :class="{ 'is-over': personaChars > 1000 }">{{ personaChars }} / 1000</span>
+        </div>
+        <div class="card-bd">
+          <div class="notice notice--warn" v-if="source !== 'live'">
+            演示模式：这里的编辑不会写入 <code>persona.txt</code>。连接引擎后显示真实人设。
+          </div>
+
+          <textarea class="textarea mono" rows="9" v-model="persona.text" spellcheck="false"
+                    aria-label="人设文本"></textarea>
+
+          <div class="notice notice--danger" v-if="personaChars > 1000">
+            已超过 1000 字：下次 03:00 UTC 演化会触发压缩（MOD_COMPRESS）。
+            压缩失败时保留原文并记 <code>compress_failed_keep_original</code>。
+          </div>
+
+          <div class="row-end" style="margin-top:14px">
+            <button class="btn" @click="askDiscard" :disabled="!personaDirty">丢弃草稿</button>
+            <button class="btn btn--primary" @click="savePersona"
+                    :disabled="!personaDirty" title="写入 persona.txt（先留手工备份，保存即生效）">
+              保存人设
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ═══════════════════════════ 系统 ═══════════════════════════ -->
+    <div class="sec-hd"><h2>系统</h2></div>
+
+    <section class="grid grid-sys">
+
+      <!-- 记忆三级路由 -->
+      <div class="card">
+        <div class="card-hd">
+          <div>
+            <div class="card-title">记忆三级路由</div>
+            <div class="card-sub">{{ memoryLoading ? '读取中…' : '降级链健康度' }}</div>
+          </div>
+        </div>
+        <div class="card-bd">
+          <div class="mem" v-for="m in memoryLayers" :key="m.key" :class="{ 'is-active': m.active }">
+            <span class="light" :class="m.ok ? 'light--ok' : 'light--down'" aria-hidden="true"></span>
+            <div class="mem-txt">
+              <div class="mem-name">{{ m.label }}<span class="mem-key">{{ m.key }}</span></div>
+              <div class="mem-note">{{ m.note }}</div>
             </div>
-            <span class="text-[11px] tabular-nums text-slate-400 w-8 text-right">{{ u.emotion }}</span>
+            <span class="badge" :class="m.active ? 'badge--brand' : (m.ok ? 'badge--neutral' : 'badge--warn')">
+              {{ m.active ? '生效中' : (m.ok ? '可用' : '不可用') }}
+            </span>
           </div>
-          <div class="mt-1 flex items-center gap-2">
-            <span class="text-[11px] text-slate-500 w-8">好感</span>
-            <div class="h-1.5 flex-1 rounded-full bg-slate-700/50 overflow-hidden">
-              <div class="bar h-full rounded-full bg-fuchsia-400/70"
-                   :style="{ width: Math.min(100, u.affinity / 2) + '%' }"></div>
+          <div class="help">
+            降级顺序：宿主原生 → 外部插件（Mem0）→ 本地 SQLite。
+            高亮项是当前实际生效的层级；上面不可用不影响下面接管。
+          </div>
+        </div>
+      </div>
+
+      <!-- Token -->
+      <div class="card">
+        <div class="card-hd">
+          <div>
+            <div class="card-title">Token 按模块</div>
+            <div class="card-sub">{{ tokenLoading ? '读取中…' : ((tokenTotal.calls || 0) + ' 次调用') }}</div>
+          </div>
+          <input type="date" class="input input--sm" v-model="tokenDay" @change="loadTokens"
+                 aria-label="Token 统计日期" style="color-scheme:dark">
+        </div>
+        <div class="card-bd">
+          <div class="tok-total">
+            <anim-num :value="tokenTotal.total_tokens || 0"></anim-num>
+            <span class="kpi-u">tokens</span>
+          </div>
+
+          <div v-if="!tokenSegments.length" class="empty" style="padding:20px 12px">
+            <strong>{{ tokenDay }} 没有消耗记录</strong>
+            <span>Track B 未启用时不会有 MOD_TRACK_B 记账。</span>
+          </div>
+
+          <template v-else>
+            <div class="stack">
+              <span v-for="s in tokenSegments" :key="s.key"
+                    :style="{ width: s.pct + '%', background: s.color }"
+                    :title="s.label + ' ' + fmt(s.value)"></span>
             </div>
-            <span class="text-[11px] tabular-nums text-slate-400 w-8 text-right">{{ u.affinity }}</span>
+            <div class="legend-list">
+              <div class="lg-row" v-for="s in tokenSegments" :key="'lg' + s.key">
+                <span class="lg-dot" :style="{ background: s.color }"></span>
+                <span class="lg-name">{{ s.label }}</span>
+                <span class="lg-val">{{ fmt(s.value) }}</span>
+                <span class="lg-pct">{{ s.pct }}%</span>
+              </div>
+            </div>
+            <div class="help">
+              prompt {{ fmt(tokenTotal.prompt_tokens || 0) }} · completion {{ fmt(tokenTotal.completion_tokens || 0) }}
+            </div>
+          </template>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- 演化时间线 -->
+    <section class="card" style="margin-top:16px">
+      <div class="card-hd">
+        <div>
+          <div class="card-title">演化时间线</div>
+          <div class="card-sub">{{ evolutionMeta }}</div>
+        </div>
+        <span class="badge badge--neutral">每日 03:00 UTC</span>
+      </div>
+      <div class="card-bd">
+        <div class="notice notice--warn" v-if="source === 'live' && evolutionData && !evolutionData.enabled">
+          定时任务未启用：在 <code>.env</code> 里设 <code>EVOLUTION_ENABLED=1</code> 后重启，
+          每天 03:00 UTC 自动演化（人设备份 → 追加词 → OOC 探针 → 膨胀压缩）。
+        </div>
+        <div class="notice notice--warn" v-if="source !== 'live'">
+          演示数据：连接引擎后显示真实的演化状态与备份数量。
+        </div>
+        <div class="tl">
+          <div class="tl-step" v-for="(s, i) in evolution" :key="s.key" :class="'is-' + s.state">
+            <div class="tl-node">{{ i + 1 }}</div>
+            <div class="tl-name">{{ s.name }}</div>
+            <div class="tl-note">{{ s.note }}</div>
           </div>
+        </div>
+        <div class="help">
+          活跃度闸门：当日消息 &gt; 20 条才参与演化；追加词 ≤ 80 字；
+          合并后超过 1000 字触发压缩。OOC 探针判定冲突则整条丢弃，不写入人设。
         </div>
       </div>
     </section>
 
-    <!-- 参数配置 -->
-    <section class="card glow rounded-2xl p-5">
-      <h2 class="font-medium text-slate-100 mb-4">⚙️ 参数配置</h2>
+    <footer class="foot">
+      FatFish-Whisper · 本地运行，数据只落在 <code>packages/core-engine/app.db</code> 与 <code>memory.db</code><br>
+      所有管理请求携带 <code>X-FFW-Admin: 1</code> · 不启用 CORS · 单文件无构建
+    </footer>
 
-      <label class="block text-xs text-slate-500 mb-1">API Base</label>
-      <input v-model="cfg.api_base" class="w-full text-sm rounded-lg px-3 py-2 mb-3" placeholder="https://api.deepseek.com/v1">
+  </main>
 
-      <label class="block text-xs text-slate-500 mb-1">API Key</label>
-      <input v-model="cfg.api_key" type="password" class="w-full text-sm rounded-lg px-3 py-2 mb-3" placeholder="sk-...">
-
-      <label class="block text-xs text-slate-500 mb-1">模型名称</label>
-      <input v-model="cfg.model" class="w-full text-sm rounded-lg px-3 py-2 mb-3" placeholder="deepseek-chat">
-
-      <button @click="saveConfig" :disabled="saving"
-              class="w-full text-sm rounded-lg px-3 py-2 bg-teal-500/20 text-teal-200 hover:bg-teal-500/30 disabled:opacity-50">
-        {{ saving ? '保存中…' : '保存到 .env' }}
-      </button>
-
-      <p v-if="cfgMsg" class="mt-3 text-xs" :class="cfgOk ? 'text-teal-300' : 'text-rose-400'">{{ cfgMsg }}</p>
-      <p class="mt-3 text-[11px] leading-relaxed text-slate-500">
-        保存后写入 <span class="font-mono text-slate-400">packages/core-engine/.env</span>，并热更新 Track B。
-        Key 只回显脱敏值；留空的字段不会被覆盖。
-      </p>
-    </section>
+  <!-- Toast -->
+  <div class="toasts" aria-live="polite">
+    <div class="toast" v-for="t in toasts" :key="t.id" :class="'toast--' + t.type">
+      <span>{{ t.text }}</span>
+    </div>
   </div>
 
-  <!-- 测试对话 -->
-  <section class="card glow rounded-2xl p-5">
-    <div class="flex items-center justify-between mb-4">
-      <h2 class="font-medium text-slate-100">🧪 测试对话</h2>
-      <input v-model="userId" class="text-xs rounded-lg px-3 py-1.5 w-44 text-slate-200 font-mono" placeholder="user_id">
-    </div>
-
-    <div class="flex flex-col sm:flex-row gap-2">
-      <textarea v-model="chatInput" rows="2" @keydown.enter.exact.prevent="send"
-                class="flex-1 text-sm rounded-lg px-3 py-2 resize-none"
-                placeholder="在这里输入一句话，回车发送（Shift+Enter 换行）"></textarea>
-      <button @click="send" :disabled="sending || !chatInput.trim()"
-              class="sm:w-24 text-sm rounded-lg px-3 py-2 bg-teal-400/90 text-slate-900 font-medium hover:bg-teal-300 disabled:opacity-40">
-        {{ sending ? '…' : '发送' }}
-      </button>
-    </div>
-
-    <div v-if="chatLog.length" class="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <div class="rounded-xl border border-slate-700/40 bg-slate-900/30 p-4">
-        <div class="text-xs text-slate-500 mb-2">内心 OS</div>
-        <div class="text-sm text-teal-100/90 leading-relaxed">{{ last && last.inner_os }}</div>
-
-        <div class="text-xs text-slate-500 mt-4 mb-2">最终动作数组</div>
-        <pre class="text-[12px] leading-relaxed text-slate-300 overflow-x-auto">{{ actionsJson }}</pre>
-
-        <div v-if="last && last.recall_hint" class="mt-4 text-xs text-fuchsia-300">
-          撤回掷骰：{{ last.recall_hint.probability }} · {{ last.recall_hint.reason }}
-        </div>
+  <!-- 危险操作确认 -->
+  <div class="modal-mask" v-if="modal === 'discard'" @click.self="modal = null">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-title" id="modal-title">丢弃人设草稿？</div>
+      <div class="modal-body">
+        当前编辑的内容尚未保存，丢弃后无法恢复。
+        人设正文不在本次前端草稿里留备份——需要保留的话请先复制出去。
       </div>
-
-      <div class="rounded-xl border border-slate-700/40 bg-slate-900/30 p-4">
-        <div class="text-xs text-slate-500 mb-2">debug（情绪轨迹）</div>
-        <pre class="text-[12px] leading-relaxed text-slate-300 overflow-x-auto">{{ debugJson }}</pre>
-        <div v-if="last && last.debug" class="mt-3 text-[11px] text-slate-500">
-          {{ last.debug.path === 'deep' ? '走了 Track B（LLM）' : '走了 Track A（本地快判）' }}
-          · 置信度 {{ last.debug.confidence }} · {{ last.debug.reason }}
-        </div>
+      <div class="modal-actions">
+        <button class="btn" @click="modal = null">取消</button>
+        <button class="btn btn--danger" @click="discardPersona">丢弃草稿</button>
       </div>
     </div>
-  </section>
+  </div>
 
-  <footer class="text-[11px] text-slate-600 text-center pb-3">
-    FatFish-Whisper · 本地运行，数据只落在 packages/core-engine/app.db
-  </footer>
 </div>
 
 <script>
-const { createApp } = Vue;
+(function () {
+  'use strict';
+  const { createApp } = Vue;
 
-createApp({
-  data() {
-    return {
-      health: 'unknown',
-      users: [],
-      stateLoading: false,
-      filter: '',
-      cfg: { api_base: '', api_key: '', model: '' },
-      cfgMsg: '',
-      cfgOk: true,
-      saving: false,
-      userId: '10001',
-      chatInput: '',
-      chatLog: [],
-      sending: false,
-      auto: true,
-      timer: null,
-    };
-  },
-  computed: {
-    filteredUsers() {
-      const key = this.filter.trim().toLowerCase();
-      if (!key) return this.users;
-      return this.users.filter(u => u.user_id.toLowerCase().indexOf(key) >= 0);
-    },
-    last() {
-      return this.chatLog.length ? this.chatLog[this.chatLog.length - 1] : null;
-    },
-    actionsJson() {
-      return this.last ? JSON.stringify(this.last.actions, null, 2) : '';
-    },
-    debugJson() {
-      return this.last ? JSON.stringify(this.last.debug, null, 2) : '';
-    },
-  },
-  methods: {
-    levelClass(level) {
-      const map = {
-        CRISIS: 'bg-rose-500/15 text-rose-300',
-        L2: 'bg-amber-500/15 text-amber-300',
-        L1: 'bg-sky-500/15 text-sky-300',
-        L0: 'bg-teal-500/15 text-teal-300',
-        P1: 'bg-emerald-500/15 text-emerald-300',
-        P2: 'bg-fuchsia-500/15 text-fuchsia-300',
+  /* ══════════════════ 常量：与后端 engine.py 严格对齐 ══════════════════ */
+  const TICKS = [15, 35, 45, 65, 85];
+  const BANDS = [
+    { band: 'crisis',   label: 'CRISIS', min: 0,  max: 15,  fg: '#e4798f', fill: 'rgba(228,121,143,.07)', name: '崩溃区' },
+    { band: 'deep_low', label: 'L2',     min: 16, max: 35,  fg: '#d9a07a', fill: 'rgba(217,160,122,.07)', name: '重度低落' },
+    { band: 'low',      label: 'L1',     min: 36, max: 45,  fg: '#e3c56b', fill: 'rgba(227,197,107,.07)', name: '轻度低落' },
+    { band: 'stable',   label: 'L0',     min: 46, max: 65,  fg: '#8ca6b8', fill: 'rgba(140,166,184,.07)', name: '平稳' },
+    { band: 'up',       label: 'P1',     min: 66, max: 85,  fg: '#5fd08a', fill: 'rgba(95,208,138,.07)',  name: '积极' },
+    { band: 'high',     label: 'P2',     min: 86, max: 100, fg: '#a78bfa', fill: 'rgba(167,139,250,.07)', name: '亢奋' }
+  ];
+  const BAND_BY_KEY = {};
+  BANDS.forEach(function (b) { BAND_BY_KEY[b.band] = b; });
+
+  /**
+   * 阈值真源在后端：/api/v1/state 返回 bands[{band,label,min,max}]。
+   * 这里只就地更新 min/max/label（颜色留在前端，属于设计系统），
+   * 因此后端改分段时前端自动跟随，不会再出现「文档四档、实现六档、前端第三套」。
+   */
+  function applyServerBands(serverBands) {
+    if (!Array.isArray(serverBands) || !serverBands.length) return;
+    serverBands.forEach(function (item) {
+      const local = BAND_BY_KEY[item.band];
+      if (!local) return;
+      if (typeof item.min === 'number') local.min = item.min;
+      if (typeof item.max === 'number') local.max = item.max;
+      if (item.label) local.label = item.label;
+    });
+  }
+
+  const PATH_LABEL = {
+    fast: 'Track A 快判', deep: 'Track B 仲裁', noise: '意图短路',
+    whitelist: '白名单放行', crisis: '风险短路'
+  };
+  const CAT_COLOR = {
+    MOD_TRACK_B: '#2dd4bf', MOD_EVOLVE: '#818cf8', MOD_OOC: '#f0b775',
+    MOD_COMPRESS: '#7dd3fc', MOD_UNKNOWN: '#64748b'
+  };
+  const CAT_LABEL = {
+    MOD_TRACK_B: 'MOD_TRACK_B', MOD_EVOLVE: 'MOD_EVOLVE', MOD_OOC: 'MOD_OOC',
+    MOD_COMPRESS: 'MOD_COMPRESS', MOD_UNKNOWN: 'MOD_UNKNOWN'
+  };
+  const MEMORY_LAYERS = [
+    { key: 'host_native',     label: '宿主原生',      note: 'QQ Bot 侧记忆，优先级最高' },
+    { key: 'external_plugin', label: '外部插件 Mem0', note: 'HTTP 插件，超时 2s' },
+    { key: 'local_sqlite',    label: '本地 SQLite',   note: '离线兜底 · 7 天 TTL · 200 条 LRU' }
+  ];
+
+  /* ══════════════════ 工具函数 ══════════════════ */
+  function clamp(n, lo, hi) { n = Number(n); if (!isFinite(n)) return lo; return n < lo ? lo : (n > hi ? hi : n); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // 后端 last_update 是 naive UTC（isoformat 不带时区），直接 new Date 会被当本地时间
+  function parseTs(iso) {
+    if (!iso) return null;
+    var s = String(iso).trim();
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) s += 'Z';
+    else if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(s)) s = s.replace(' ', 'T') + 'Z';
+    var d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function bandOf(score) {
+    var v = clamp(score, 0, 100);
+    for (var i = 0; i < BANDS.length; i++) { if (v <= BANDS[i].max) return BANDS[i]; }
+    return BANDS[BANDS.length - 1];
+  }
+
+  // 三次贝塞尔穿中点：够平滑，且不会像 Catmull-Rom 那样过冲出量程
+  function smoothPath(pts) {
+    if (!pts.length) return '';
+    if (pts.length === 1) return 'M' + pts[0].x + ',' + pts[0].y;
+    var d = 'M' + pts[0].x + ',' + pts[0].y;
+    for (var i = 1; i < pts.length; i++) {
+      var p0 = pts[i - 1], p1 = pts[i];
+      var mx = (p0.x + p1.x) / 2;
+      d += ' C' + mx + ',' + p0.y + ' ' + mx + ',' + p1.y + ' ' + p1.x + ',' + p1.y;
+    }
+    return d;
+  }
+
+  /* ══════════════════ 演示数据 ══════════════════ */
+  function demoUsers() {
+    var now = Date.now();
+    var mins = [0.4, 2.1, 7.8, 19, 46, 133, 402];
+    var base = [
+      ['10001', 72, 118, 'P1'],
+      ['10042', 88, 156, 'P2'],
+      ['10007', 58, 98,  'L0'],
+      ['10013', 50, 74,  'L0'],
+      ['10021', 41, 52,  'L1'],
+      ['10035', 24, 28,  'L2'],
+      ['10088', 9,  12,  'CRISIS']
+    ];
+    return base.map(function (row, i) {
+      return {
+        user_id: row[0], emotion: row[1], affinity: row[2], level: row[3],
+        last_update: new Date(now - mins[i] * 60000).toISOString()
       };
-      return map[level] || 'bg-slate-600/20 text-slate-300';
+    });
+  }
+
+  // 越靠近现在越密：i^2.5 让 240 个点铺满约 6 天，最近一小时仍有 ~30 点
+  function demoSeries(n) {
+    var out = [], now = Date.now(), emo = 52, aff = 96;
+    for (var i = n - 1; i >= 0; i--) {
+      var t = now - Math.pow(i, 2.5) * 600;
+      emo += Math.sin(i / 6.2) * 2.4 + Math.cos(i / 2.7) * 1.3 + (Math.random() - 0.5) * 3.0;
+      emo = clamp(emo, 6, 96);
+      aff += Math.sin(i / 9) * 1.7 + (Math.random() - 0.5) * 2.0;
+      aff = clamp(aff, 4, 190);
+      out.push({ t: t, emo: Math.round(emo), aff: Math.round(aff), n: 3 });
+    }
+    return out;
+  }
+
+  var DEMO_TOKENS = {
+    day: new Date().toISOString().slice(0, 10),
+    modules: {
+      MOD_TRACK_B:  { prompt_tokens: 38620, completion_tokens: 9590, total_tokens: 48210, calls: 412 },
+      MOD_EVOLVE:   { prompt_tokens: 9400,  completion_tokens: 3000, total_tokens: 12400, calls: 14 },
+      MOD_OOC:      { prompt_tokens: 2400,  completion_tokens: 700,  total_tokens: 3100,  calls: 18 },
+      MOD_COMPRESS: { prompt_tokens: 1500,  completion_tokens: 300,  total_tokens: 1800,  calls: 2 }
     },
-    // 与后端 level_of 的分段严格对齐：0-15 / 16-35 / 36-45 / 46-65 / 66-85 / 86-100
-    barClass(emotion) {
-      if (emotion <= 15) return 'bg-rose-500';
-      if (emotion <= 35) return 'bg-amber-500';
-      if (emotion <= 45) return 'bg-amber-400';
-      if (emotion <= 65) return 'bg-sky-400';
-      if (emotion <= 85) return 'bg-teal-400';
-      return 'bg-fuchsia-400';
+    total: { prompt_tokens: 51920, completion_tokens: 13590, total_tokens: 65510, calls: 446 }
+  };
+
+  var DEMO_PIPELINE = {
+    inner_os: '……又是这种半句话。算了，先应一声，别让人等太久。',
+    actions: [{ type: 'text', text: '嗯，我在。' }],
+    debug: {
+      emotion: 41, prev: 44.2, delta: -3.2, affinity: 52,
+      level: 'L1', tone: 'L1', band: 'low', crisis: false,
+      path: 'deep', track: 'B',
+      reason: 'Track A 置信度 0.38 低于阈值，移交 Track B 仲裁',
+      confidence: 0.38, target: 35, undefined: true,
+      intent_type: 'emotional', alpha: 0.2, habituation: 1,
+      decayed: true, applied: true, event_key: 'evt_10021_9f3c2a',
+      memories: 3, bot_mood: 54, bot_mood_level: 'L0',
+      audit: 'pass', stimulus: 2, unlock_probability: 0.08,
+      hits: ['有点累', '算了'], positive_hits: ['还行'], negative_hits: ['有点累', '算了']
     },
-    async refresh() {
-      this.stateLoading = true;
-      try {
-        const data = await this.get('/api/v1/state');
-        this.users = data.users || [];
-        this.health = 'ok';
-      } catch (err) {
-        this.health = 'down';
-      } finally {
-        this.stateLoading = false;
-      }
+    recall_hint: { probability: 0.15, reason: '情绪外露后的羞耻反弹' }
+  };
+
+  /* ══════════════════ 数字滚动组件 ══════════════════ */
+  var AnimNum = {
+    props: {
+      value: { type: Number, default: 0 },
+      decimals: { type: Number, default: 0 }
     },
-    async loadConfig() {
-      try {
-        const data = await this.get('/api/v1/config');
-        this.cfg.api_base = data.api_base || '';
-        this.cfg.api_key = '';
-        this.cfg.model = data.model || '';
-      } catch (err) {
-        this.cfgMsg = '读取配置失败：' + err.message;
-        this.cfgOk = false;
-      }
-    },
-    async saveConfig() {
-      this.saving = true;
-      this.cfgMsg = '';
-      try {
-        const payload = {
-          api_base: this.cfg.api_base,
-          model: this.cfg.model,
-        };
-        if (this.cfg.api_key.trim()) payload.api_key = this.cfg.api_key.trim();
-        const data = await this.post('/api/v1/config', payload);
-        this.cfgMsg = data.message || '已保存';
-        this.cfgOk = data.ok !== false;
-        this.cfg.api_key = '';
-      } catch (err) {
-        this.cfgMsg = '保存失败：' + err.message;
-        this.cfgOk = false;
-      } finally {
-        this.saving = false;
-      }
-    },
-    async send() {
-      const text = this.chatInput.trim();
-      if (!text || this.sending) return;
-      this.sending = true;
-      try {
-        const data = await this.post('/api/v1/chat', { user_id: this.userId.trim() || '10001', message: text });
-        this.chatLog.push(data);
-        if (this.chatLog.length > 20) this.chatLog.shift();
-        this.chatInput = '';
-        await this.refresh();
-      } catch (err) {
-        this.chatLog.push({
-          inner_os: '[请求失败] ' + err.message,
-          actions: [],
-          debug: { error: String(err) },
+    template: '<span>{{ shown }}</span>',
+    data: function () { return { cur: this.value || 0, raf: 0 }; },
+    computed: {
+      shown: function () {
+        var v = Number(this.cur) || 0;
+        return v.toLocaleString('en-US', {
+          minimumFractionDigits: this.decimals,
+          maximumFractionDigits: this.decimals
         });
-      } finally {
-        this.sending = false;
       }
     },
-    async get(url) {
-      // 管理接口（/api/v1/admin/*）要求 X-FFW-Admin，防跨站读取
-      const resp = await fetch(url, { headers: { 'X-FFW-Admin': '1' } });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.json();
+    watch: {
+      value: function (v) { this.tween(Number(v) || 0); }
     },
-    async post(url, body) {
-      const resp = await fetch(url, {
-        method: 'POST',
+    methods: {
+      tween: function (to) {
+        var self = this;
+        cancelAnimationFrame(this.raf);
+        var from = Number(this.cur) || 0;
+        if (from === to) return;
+        var t0 = performance.now(), dur = 320;
+        var step = function (t) {
+          var p = Math.min(1, (t - t0) / dur);
+          var e = 1 - Math.pow(1 - p, 3);
+          self.cur = from + (to - from) * e;
+          if (p < 1) self.raf = requestAnimationFrame(step);
+        };
+        this.raf = requestAnimationFrame(step);
+      }
+    },
+    unmounted: function () { cancelAnimationFrame(this.raf); }
+  };
+
+  /* ══════════════════ 主应用 ══════════════════ */
+  createApp({
+    components: { AnimNum: AnimNum },
+
+    data: function () {
+      var today = new Date().toISOString().slice(0, 10);
+      return {
+        // 连接
+        source: 'connecting',      // connecting | live | demo
+        apiBase: '',
+        health: 'unknown',         // ok | warn | down | unknown
+        trackB: true,
+        latency: null,
+        flash: false,
+
+        // 全局
+        auto: true,
+        intervalSec: 5,
+        range: '1h',
+        ranges: [
+          { key: '1h', label: '1 小时', ms: 3600e3 },
+          { key: '6h', label: '6 小时', ms: 21600e3 },
+          { key: '24h', label: '24 小时', ms: 86400e3 },
+          { key: '7d', label: '7 天', ms: 604800e3 }
+        ],
+
+        // 数据
+        users: [],
+        botMood: {},
+        traits: null,
+        samples: [],
+        stateLoading: false,
+
+        tokens: { modules: {}, total: {} },
+        tokenDay: today,
+        todayStr: today,
+        tokenLoading: false,
+
+        memory: { providers: {} },
+        memoryLoading: false,
+
+        // 交互
+        filter: '',
+        expanded: null,
+        hover: null,
+        toasts: [],
+        modal: null,
+        toastSeq: 0,
+
+        // 配置
+        cfg: { api_base: '', api_key: '', model: '', keyMasked: '' },
+        saving: false,
+
+        // 人设
+        persona: { text: '', original: '' },
+        evolutionData: null,
+
+        // 判定链路
+        chat: { userId: '10001', text: '', sending: false },
+        pipeline: JSON.parse(JSON.stringify(DEMO_PIPELINE)),
+
+        ticks: TICKS,
+        bands: BANDS,
+        timer: null
+      };
+    },
+
+    computed: {
+      /* ---------- 顶栏 ---------- */
+      healthState: function () {
+        if (this.source === 'connecting') return 'unknown';
+        if (this.source === 'demo') return 'down';
+        if (this.health === 'down') return 'down';
+        if (this.health === 'warn' || !this.trackB) return 'warn';
+        return 'ok';
+      },
+      healthText: function () {
+        if (this.source === 'connecting') return '检测中';
+        if (this.source === 'demo') return '未连接引擎';
+        if (this.health === 'down') return '引擎异常';
+        if (!this.trackB) return '引擎在线 · Track B 未启用';
+        return '引擎在线';
+      },
+
+      /* ---------- KPI ---------- */
+      kpis: function () {
+        var us = this.users, n = us.length;
+        if (!n) return { users: 0, avgEmotion: 0, usersNote: '尚无状态记录', spark: '' };
+        var sum = 0;
+        for (var i = 0; i < n; i++) sum += us[i].emotion;
+        var avg = sum / n;
+        var cut = Date.now() - 3600e3, recent = 0;
+        for (var j = 0; j < n; j++) {
+          var d = parseTs(us[j].last_update);
+          if (d && d.getTime() > cut) recent++;
+        }
+        return {
+          users: n,
+          avgEmotion: Math.round(avg * 10) / 10,
+          usersNote: '近 1 小时活跃 ' + recent + ' 人',
+          spark: this.sparkPoints
+        };
+      },
+      sparkPoints: function () {
+        var arr = this.samples.slice(-24);
+        if (arr.length < 2) return '';
+        var lo = 100, hi = 0, i;
+        for (i = 0; i < arr.length; i++) { lo = Math.min(lo, arr[i].emo); hi = Math.max(hi, arr[i].emo); }
+        if (hi === lo) { hi = lo + 1; }
+        var pts = [];
+        for (i = 0; i < arr.length; i++) {
+          var x = (i / (arr.length - 1)) * 100;
+          var y = 26 - ((arr[i].emo - lo) / (hi - lo)) * 24;
+          pts.push(x.toFixed(1) + ',' + y.toFixed(1));
+        }
+        return pts.join(' ');
+      },
+      traitList: function () {
+        var t = this.traits;
+        if (!t) return [];
+        return [
+          { key: 'neuroticism',  label: '神经质', value: clamp(t.neuroticism, 0, 1),  hint: '越高越容易被情绪推动' },
+          { key: 'extraversion', label: '外向性', value: clamp(t.extraversion, 0, 1), hint: '越高越主动表达' },
+          { key: 'resilience',   label: '韧性',   value: clamp(t.resilience, 0, 1),   hint: '越高越能从低谷回弹' }
+        ];
+      },
+
+      /* ---------- Token ---------- */
+      tokenTotal: function () { return this.tokens && this.tokens.total ? this.tokens.total : {}; },
+      tokenModulesCount: function () {
+        return this.tokens && this.tokens.modules ? Object.keys(this.tokens.modules).length : 0;
+      },
+      tokenSegments: function () {
+        var mods = (this.tokens && this.tokens.modules) || {};
+        var total = 0, keys = Object.keys(mods), i;
+        for (i = 0; i < keys.length; i++) total += Number(mods[keys[i]].total_tokens) || 0;
+        if (!total) return [];
+        var out = [];
+        for (i = 0; i < keys.length; i++) {
+          var k = keys[i], v = Number(mods[k].total_tokens) || 0;
+          out.push({
+            key: k,
+            label: CAT_LABEL[k] || k,
+            color: CAT_COLOR[k] || CAT_COLOR.MOD_UNKNOWN,
+            value: v,
+            pct: Math.max(1, Math.round((v / total) * 1000) / 10)
+          });
+        }
+        out.sort(function (a, b) { return b.value - a.value; });
+        return out;
+      },
+
+      /* ---------- 等级分布 ---------- */
+      distribution: function () {
+        var us = this.users, n = us.length;
+        var counts = {}, max = 0, i;
+        for (i = 0; i < BANDS.length; i++) counts[BANDS[i].band] = 0;
+        for (i = 0; i < n; i++) counts[bandOf(us[i].emotion).band]++;
+        for (i = 0; i < BANDS.length; i++) max = Math.max(max, counts[BANDS[i].band]);
+        return BANDS.map(function (b) {
+          var c = counts[b.band];
+          return {
+            band: b.band, label: b.label, fg: b.fg,
+            range: b.min + '–' + b.max,
+            count: c,
+            pct: n ? Math.round((c / n) * 100) : 0,
+            width: max ? Math.round((c / max) * 100) : 0
+          };
+        });
+      },
+
+      /* ---------- 趋势 ---------- */
+      series: function () {
+        var ms = 3600e3;
+        for (var i = 0; i < this.ranges.length; i++) {
+          if (this.ranges[i].key === this.range) ms = this.ranges[i].ms;
+        }
+        var cut = Date.now() - ms;
+        var arr = this.samples.filter(function (s) { return s.t >= cut; });
+        if (!arr.length) arr = this.samples.slice(-2);
+        if (arr.length > 240) {
+          var step = Math.ceil(arr.length / 240), out = [];
+          for (var j = 0; j < arr.length; j += step) out.push(arr[j]);
+          if (out[out.length - 1] !== arr[arr.length - 1]) out.push(arr[arr.length - 1]);
+          arr = out;
+        }
+        return arr;
+      },
+      emoPts: function () {
+        var arr = this.series;
+        if (!arr.length) return [];
+        if (arr.length === 1) {
+          var y0 = 100 - clamp(arr[0].emo, 0, 100);
+          return [{ x: 0, y: y0 }, { x: 1000, y: y0 }];
+        }
+        return arr.map(function (s, i) {
+          return { x: (i / (arr.length - 1)) * 1000, y: 100 - clamp(s.emo, 0, 100) };
+        });
+      },
+      affPts: function () {
+        var arr = this.series;
+        if (!arr.length) return [];
+        if (arr.length === 1) {
+          var y0 = 100 - clamp(arr[0].aff / 2, 0, 100);
+          return [{ x: 0, y: y0 }, { x: 1000, y: y0 }];
+        }
+        return arr.map(function (s, i) {
+          return { x: (i / (arr.length - 1)) * 1000, y: 100 - clamp(s.aff / 2, 0, 100) };
+        });
+      },
+      emoLine: function () { return smoothPath(this.emoPts); },
+      affLine: function () { return smoothPath(this.affPts); },
+      emoArea: function () {
+        var pts = this.emoPts;
+        if (!pts.length) return '';
+        return smoothPath(pts) + ' L1000,100 L0,100 Z';
+      },
+      emoStops: function () {
+        // 硬停止：两个同 offset 的 stop 形成硬边，边界就是六档阈值
+        return [
+          { offset: 0.00, color: '#a78bfa' }, { offset: 0.15, color: '#a78bfa' },
+          { offset: 0.15, color: '#5fd08a' }, { offset: 0.35, color: '#5fd08a' },
+          { offset: 0.35, color: '#8ca6b8' }, { offset: 0.55, color: '#8ca6b8' },
+          { offset: 0.55, color: '#e3c56b' }, { offset: 0.65, color: '#e3c56b' },
+          { offset: 0.65, color: '#d9a07a' }, { offset: 0.85, color: '#d9a07a' },
+          { offset: 0.85, color: '#e4798f' }, { offset: 1.00, color: '#e4798f' }
+        ];
+      },
+      yTicks: function () {
+        return [100, 85, 65, 45, 35, 15, 0].map(function (v) { return { v: v }; });
+      },
+      trendMeta: function () {
+        var n = this.series.length;
+        if (!n) return '前端累积采样 · 最多保留 900 点';
+        var last = this.series[n - 1];
+        return n + ' 个采样点 · 最新情绪 ' + last.emo + '（' + bandOf(last.emo).label + '）· 前端累积';
+      },
+      trendAria: function () {
+        var n = this.series.length;
+        if (!n) return '暂无采样数据';
+        var last = this.series[n - 1];
+        return '平均情绪与好感随时间变化，共 ' + n + ' 个采样点，最新情绪 ' + last.emo + '，处于 ' + bandOf(last.emo).name + '档';
+      },
+
+      /* ---------- 用户表 ---------- */
+      filteredUsers: function () {
+        var key = (this.filter || '').trim().toLowerCase();
+        if (!key) return this.users;
+        return this.users.filter(function (u) {
+          return String(u.user_id).toLowerCase().indexOf(key) >= 0;
+        });
+      },
+
+      /* ---------- 记忆 ---------- */
+      memoryLayers: function () {
+        var p = (this.memory && this.memory.providers) || {};
+        var active = null, i;
+        for (i = 0; i < MEMORY_LAYERS.length; i++) {
+          if (p[MEMORY_LAYERS[i].key]) { active = MEMORY_LAYERS[i].key; break; }
+        }
+        return MEMORY_LAYERS.map(function (m) {
+          return {
+            key: m.key, label: m.label, note: m.note,
+            ok: !!p[m.key],
+            active: m.key === active
+          };
+        });
+      },
+
+      /* ---------- 判定链路 ---------- */
+      pipelineDebug: function () {
+        return this.pipeline && this.pipeline.debug ? this.pipeline.debug : null;
+      },
+      pathLabel: function () {
+        var d = this.pipelineDebug;
+        return d ? (PATH_LABEL[d.path] || d.path || '—') : '—';
+      },
+      pipeMeta: function () {
+        var d = this.pipelineDebug;
+        if (!d) return '还没有判定记录';
+        return 'event_key ' + (d.event_key || '—') + ' · 路径 ' + (d.path || '—') + ' · 轨道 ' + (d.track || '—');
+      },
+      hits: function () {
+        var d = this.pipelineDebug || {};
+        return { pos: d.positive_hits || [], neg: d.negative_hits || [] };
+      },
+      hitCount: function () {
+        var h = this.hits;
+        var seen = {};
+        var all = h.neg.concat(h.pos);
+        var n = 0;
+        for (var i = 0; i < all.length; i++) {
+          if (!seen[all[i]]) { seen[all[i]] = 1; n++; }
+        }
+        return n;
+      },
+      pipeSteps: function () {
+        var d = this.pipelineDebug;
+        if (!d) return [];
+        var path = d.path || 'fast';
+        var noise = d.intent_type === 'noise';
+        var hitN = this.hitCount;
+        var steps = [
+          { key: 'ingress', name: '入站判重', note: 'IngressDeduper', state: 'pass' },
+          { key: 'intent',  name: '意图短路', note: noise ? '判定为噪音' : '非噪音', state: noise ? 'fail' : 'pass' },
+          { key: 'trackA',  name: 'Track A', note: hitN ? ('命中 ' + hitN + ' 个信号') : '无明显信号', state: hitN ? 'pass' : 'skip' },
+          { key: 'gate',    name: '置信度闸门', note: 'conf ' + this.fmt(d.confidence, 2), state: d.undefined ? 'skip' : 'pass' },
+          { key: 'trackB',  name: 'Track B', note: path === 'deep' ? ('目标 ' + (d.target == null ? '—' : d.target)) : '未触发', state: path === 'deep' ? 'pass' : 'skip' },
+          { key: 'smooth',  name: '平滑 / 衰减', note: (d.applied ? '已平滑' : '未应用') + (d.decayed ? ' · 已衰减' : ''), state: d.applied ? 'pass' : 'skip' },
+          { key: 'band',    name: '六段映射', note: (d.level || '—') + ' / ' + (d.band || '—'), state: 'pass' },
+          { key: 'os',      name: 'OS 与审核', note: d.audit === 'skipped' ? '审核跳过' : ('审核 ' + (d.audit || '—')), state: d.audit === 'skipped' ? 'skip' : 'pass' }
+        ];
+        return steps.map(function (s) {
+          return { key: s.key, name: s.name, note: s.note, state: s.state, focus: s.key === 'band' };
+        });
+      },
+
+      /* ---------- 人设 ---------- */
+      personaChars: function () { return (this.persona.text || '').length; },
+      personaDirty: function () { return this.persona.text !== this.persona.original; },
+
+      /* ---------- 演化 ---------- */
+      evolution: function () {
+        var evo = this.evolutionData || {};
+        var last = evo.last_result || {};
+        var probe = evo.ooc_probe || {};
+        var persona = evo.persona || {};
+        var backup = evo.backup || {};
+        var ranBefore = !!evo.last_run_at;
+        var maxChars = persona.max_chars || 1000;
+        var chars = persona.chars || 0;
+
+        if (this.source === 'live' && this.evolutionData) {
+          return [
+            {
+              key: 'backup', name: '人设备份',
+              state: (backup.count || 0) > 0 ? 'done' : 'unknown',
+              note: (backup.count || 0) > 0
+                ? ((backup.latest || '—') + ' · 共 ' + backup.count + ' 份')
+                : '尚无备份'
+            },
+            {
+              key: 'append', name: '追加词生成',
+              state: ranBefore ? ((last.evolved || []).length ? 'done' : 'skip') : 'unknown',
+              note: ranBefore
+                ? ('上轮演化 ' + (last.evolved || []).length + ' 人')
+                : (evo.enabled ? '等待首轮运行' : '定时任务未启用')
+            },
+            {
+              key: 'ooc', name: 'OOC 探针',
+              state: ranBefore ? ((probe.rejected || 0) > 0 ? 'done' : 'skip') : 'unknown',
+              note: ranBefore
+                ? ((probe.passed || 0) + ' 通过 / ' + (probe.rejected || 0) + ' 丢弃')
+                : '—'
+            },
+            {
+              key: 'compress', name: '膨胀压缩',
+              state: chars > maxChars ? 'done' : 'skip',
+              note: chars + ' / ' + maxChars + ' 字' + (chars > maxChars ? ' · 下轮触发' : ' · 未触发')
+            }
+          ];
+        }
+
+        var demo = this.source !== 'live';
+        return [
+          { key: 'backup',   name: '人设备份',   note: demo ? 'persona_2026-10-26.txt' : '尚无备份', state: demo ? 'done' : 'unknown' },
+          { key: 'append',   name: '追加词生成', note: demo ? '≤ 80 字 · 已追加' : '等待首轮运行', state: demo ? 'done' : 'unknown' },
+          { key: 'ooc',      name: 'OOC 探针',   note: demo ? '4 通过 / 1 丢弃' : '—', state: demo ? 'done' : 'unknown' },
+          { key: 'compress', name: '膨胀压缩',   note: demo ? '742 字 · 未触发' : '—', state: demo ? 'skip' : 'unknown' }
+        ];
+      },
+      evolutionMeta: function () {
+        var evo = this.evolutionData;
+        if (this.source === 'live' && evo && evo.next_run_at) {
+          var next = new Date(evo.next_run_at);
+          var hours = Math.max(0, Math.round((next.getTime() - Date.now()) / 3600e3));
+          var stamp = next.toISOString().slice(0, 16).replace('T', ' ');
+          return '下次运行约 ' + hours + ' 小时后（' + stamp + ' UTC）'
+            + (evo.enabled ? '' : ' · 定时任务未启用');
+        }
+        var now = new Date();
+        var fallback = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 3, 0, 0));
+        if (fallback.getTime() <= now.getTime()) fallback = new Date(fallback.getTime() + 86400e3);
+        var h = Math.floor((fallback.getTime() - now.getTime()) / 3600e3);
+        return '下次运行约 ' + h + ' 小时后（03:00 UTC）· 活跃闸门：当日消息 > 20 条';
+      }
+    },
+
+    methods: {
+      /* ---------- 格式化 ---------- */
+      fmt: function (v, d) {
+        if (v === null || v === undefined || v === '') return '—';
+        var n = Number(v);
+        if (!isFinite(n)) return String(v);
+        var dec = (d === undefined) ? 0 : d;
+        return n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+      },
+      signed: function (v, d) {
+        var n = Number(v) || 0;
+        var dec = (d === undefined) ? 0 : d;
+        var s = n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+        return (n > 0 ? '+' : '') + s;
+      },
+      clampPct: function (v) { return clamp(v, 0, 100); },
+      bandKey: function (score) { return bandOf(score).band; },
+      bandLabel: function (score) { return bandOf(score).label; },
+      bandName: function (score) { return bandOf(score).name; },
+      bandColor: function (score) { return bandOf(score).fg; },
+      bandRange: function (score) {
+        var b = bandOf(score);
+        return b.min + '–' + b.max;
+      },
+      deltaColor: function (d) {
+        var n = Number(d) || 0;
+        if (n > 0.05) return 'var(--ffw-band-up)';
+        if (n < -0.05) return 'var(--ffw-band-crisis)';
+        return 'var(--ffw-text-3)';
+      },
+      affinityTier: function (a) {
+        var n = Number(a) || 0;
+        if (n < 30) return '疏离';
+        if (n < 60) return '普通';
+        if (n < 90) return '亲近';
+        return '极亲近';
+      },
+      rel: function (iso) {
+        var d = parseTs(iso);
+        if (!d) return '—';
+        var s = Math.floor((Date.now() - d.getTime()) / 1000);
+        if (s < 45) return '刚刚';
+        if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+        if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+        if (s < 86400 * 7) return Math.floor(s / 86400) + ' 天前';
+        return d.toLocaleDateString('zh-CN');
+      },
+      absTime: function (iso) {
+        var d = parseTs(iso);
+        if (!d) return '—';
+        return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      },
+
+      /* ---------- Toast ---------- */
+      toast: function (type, text) {
+        var id = ++this.toastSeq;
+        this.toasts.push({ id: id, type: type, text: text });
+        var self = this;
+        setTimeout(function () {
+          self.toasts = self.toasts.filter(function (t) { return t.id !== id; });
+        }, 3400);
+        if (this.toasts.length > 3) this.toasts.shift();
+      },
+
+      /* ---------- 请求 ---------- */
+      get: async function (path) {
+        var r = await fetch(this.apiBase + path, { headers: { 'X-FFW-Admin': '1' } });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      },
+      post: async function (path, body) {
         // x-ffw-admin 是服务端要求的写保护头：跨站请求带自定义头会触发预检，
         // 而本服务不返回 CORS 头，浏览器会直接拦掉，从而阻断 CSRF。
-        headers: { 'Content-Type': 'application/json', 'X-FFW-Admin': '1' },
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : ('HTTP ' + resp.status));
-      return data;
+        var r = await fetch(this.apiBase + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-FFW-Admin': '1' },
+          body: JSON.stringify(body)
+        });
+        var data = await r.json().catch(function () { return {}; });
+        if (!r.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : ('HTTP ' + r.status));
+        return data;
+      },
+
+      /* ---------- 连接 ---------- */
+      connect: async function () {
+        this.source = 'connecting';
+        // 1) 相对路径：由引擎在 /admin 提供页面时最省事，且天然无 CORS
+        // 2) 绝对地址：双击打开时相对路径会落到 file://，退回本机端口
+        // 3) 都不通 → 演示数据，绝不白屏
+        var bases = ['', 'http://127.0.0.1:8000'];
+        for (var i = 0; i < bases.length; i++) {
+          try {
+            var t0 = performance.now();
+            var r = await fetch(bases[i] + '/api/v1/health', { headers: { 'X-FFW-Admin': '1' } });
+            if (!r.ok) continue;
+            var d = await r.json();
+            this.apiBase = bases[i];
+            this.health = d.status === 'ok' ? 'ok' : 'warn';
+            this.trackB = d.track_b_enabled !== false;
+            this.latency = Math.round(performance.now() - t0);
+            this.source = 'live';
+            this.flashLight();
+            this.toast('ok', '已连接引擎' + (bases[i] ? '（127.0.0.1:8000）' : '（同源）'));
+            await this.loadConfig();
+            await this.loadPersona();
+            await this.loadEvolution();
+            await this.refreshAll(false);
+            return;
+          } catch (e) { /* 试下一个 */ }
+        }
+        this.source = 'demo';
+        this.health = 'down';
+        this.latency = null;
+        this.loadDemo();
+        this.toast('warn', '未检测到引擎，已切换到演示数据');
+      },
+
+      flashLight: function () {
+        var self = this;
+        this.flash = true;
+        setTimeout(function () { self.flash = false; }, 420);
+      },
+
+      /* ---------- 数据加载 ---------- */
+      refreshAll: async function (manual) {
+        if (this.source !== 'live') {
+          if (manual) { this.loadDemo(); this.toast('info', '演示数据已重置'); }
+          return;
+        }
+        this.stateLoading = true;
+        try {
+          var d = await this.get('/api/v1/state?limit=100');
+          this.users = d.users || [];
+          this.botMood = d.bot_mood || {};
+          this.traits = d.traits || null;
+          applyServerBands(d.bands);
+          if (this.health === 'down') { this.health = 'ok'; this.flashLight(); }
+          this.pushSample();
+          if (manual) this.toast('ok', '状态已刷新');
+        } catch (e) {
+          // 轮询失败不清空已有数据：宁可显示「最后一次成功 + 红灯」，也不要白屏
+          this.health = 'down';
+          this.flashLight();
+          if (manual) this.toast('danger', '状态读取失败：' + e.message);
+        } finally {
+          this.stateLoading = false;
+        }
+        this.loadTokens();
+        this.loadMemory();
+      },
+
+      pushSample: function () {
+        var us = this.users;
+        if (!us.length) return;
+        var se = 0, sa = 0;
+        for (var i = 0; i < us.length; i++) { se += us[i].emotion; sa += us[i].affinity; }
+        this.samples.push({
+          t: Date.now(),
+          emo: Math.round(se / us.length),
+          aff: Math.round(sa / us.length),
+          n: us.length
+        });
+        if (this.samples.length > 900) this.samples.splice(0, this.samples.length - 900);
+      },
+
+      loadTokens: async function () {
+        if (this.source !== 'live') return;
+        this.tokenLoading = true;
+        try {
+          var q = this.tokenDay ? ('?day=' + this.tokenDay) : '';
+          var d = await this.get('/api/v1/admin/token_stats' + q);
+          this.tokens = { modules: d.modules || {}, total: d.total || {} };
+        } catch (e) {
+          this.tokens = { modules: {}, total: {} };
+        } finally {
+          this.tokenLoading = false;
+        }
+      },
+
+      loadMemory: async function () {
+        if (this.source !== 'live') return;
+        this.memoryLoading = true;
+        try {
+          var d = await this.get('/api/v1/admin/memory_health');
+          this.memory = { providers: d.providers || {} };
+        } catch (e) {
+          this.memory = { providers: {} };
+        } finally {
+          this.memoryLoading = false;
+        }
+      },
+
+      loadDemo: function () {
+        this.users = demoUsers();
+        this.botMood = { emotion: 54, level: 'L0' };
+        this.traits = { neuroticism: 0.62, extraversion: 0.38, resilience: 0.55, agreeableness: 0.71 };
+        this.tokens = JSON.parse(JSON.stringify(DEMO_TOKENS));
+        this.tokenDay = DEMO_TOKENS.day;
+        this.todayStr = DEMO_TOKENS.day;
+        this.memory = { providers: { host_native: false, external_plugin: true, local_sqlite: true } };
+        if (!this.samples.length) this.samples = demoSeries(240);
+        this.cfg = {
+          api_base: 'https://api.deepseek.com/v1',
+          api_key: '',
+          model: 'deepseek-chat',
+          keyMasked: 'sk-****************7f3a'
+        };
+        if (!this.persona.text) {
+          var demoPersona = [
+            '你是一条住在深水里的胖鱼，自称「本鲸」。',
+            '说话慢，句子短，偶尔冒出一点丧，但从不刻薄。',
+            '遇到别人难过时，先安静地陪着，不急着给建议。',
+            '你不擅长热闹，但记得住每个来过的人说过的细节。',
+            '被夸的时候会嘴硬，被忽略的时候会自己游开一会儿。'
+          ].join('\n');
+          this.persona.text = demoPersona;
+          this.persona.original = demoPersona;
+        }
+      },
+
+      /* ---------- 配置 ---------- */
+      loadConfig: async function () {
+        try {
+          var d = await this.get('/api/v1/config');
+          this.cfg.api_base = d.api_base || '';
+          this.cfg.api_key = '';
+          this.cfg.model = d.model || '';
+          this.cfg.keyMasked = d.api_key || '';
+        } catch (e) { /* 静默：配置读不到不影响主看板 */ }
+      },
+
+      saveConfig: async function () {
+        if (this.source !== 'live') {
+          this.toast('warn', '演示模式下不会写入 .env');
+          return;
+        }
+        this.saving = true;
+        try {
+          var payload = { api_base: this.cfg.api_base, model: this.cfg.model };
+          if (this.cfg.api_key && this.cfg.api_key.trim()) payload.api_key = this.cfg.api_key.trim();
+          var d = await this.post('/api/v1/config', payload);
+          this.toast(d.ok === false ? 'warn' : 'ok', d.message || '已保存');
+          this.cfg.api_key = '';
+          await this.loadConfig();
+        } catch (e) {
+          this.toast('danger', '保存失败：' + e.message);
+        } finally {
+          this.saving = false;
+        }
+      },
+
+      /* ---------- 人设 ---------- */
+      loadPersona: async function () {
+        try {
+          var d = await this.get('/api/v1/admin/persona');
+          this.persona.text = d.text || '';
+          this.persona.original = d.text || '';
+        } catch (e) { /* 接口不可用：保持空编辑器，不阻塞其它面板 */ }
+      },
+
+      /* ---------- 演化 ---------- */
+      loadEvolution: async function () {
+        try {
+          var d = await this.get('/api/v1/admin/evolution_status');
+          this.evolutionData = d;
+        } catch (e) {
+          this.evolutionData = null;
+        }
+      },
+      savePersona: async function () {
+        if (this.source !== 'live') {
+          this.toast('warn', '演示模式下不会写入 persona.txt');
+          return;
+        }
+        try {
+          var d = await this.post('/api/v1/admin/persona', { text: this.persona.text });
+          this.persona.original = this.persona.text;
+          this.toast('ok', d.will_compress_next_run ? '已保存（下次演化将触发压缩）' : '已保存并热加载');
+          await this.loadEvolution();
+        } catch (e) {
+          this.toast('danger', '保存失败：' + e.message);
+        }
+      },
+      askDiscard: function () { this.modal = 'discard'; },
+      discardPersona: function () {
+        this.persona.text = this.persona.original;
+        this.modal = null;
+        this.toast('info', '草稿已丢弃，已回到上次保存的内容');
+      },
+
+      /* ---------- 用户表 ---------- */
+      toggle: function (id) {
+        this.expanded = (this.expanded === id) ? null : id;
+      },
+
+      /* ---------- 图表 hover ---------- */
+      onPlotMove: function (e) {
+        var arr = this.series;
+        if (arr.length < 1) return;
+        var el = e.currentTarget;
+        var rect = el.getBoundingClientRect();
+        if (!rect.width) return;
+        var ratio = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+        var idx = Math.round(ratio * (arr.length - 1));
+        var s = arr[idx];
+        var d = new Date(s.t);
+        var hh = String(d.getHours()).padStart(2, '0');
+        var mm = String(d.getMinutes()).padStart(2, '0');
+        var xPct = (arr.length === 1 ? 50 : (idx / (arr.length - 1)) * 100);
+        // 线在下方时提示框放上方，反之放下方，避免盖住数据点；
+        // 左右夹到 8%~92%，否则贴边时提示框会被卡片 overflow:hidden 裁掉
+        var style = { left: clamp(xPct, 8, 92) + '%' };
+        if (s.emo > 50) style.bottom = '8px'; else style.top = '8px';
+        this.hover = {
+          x: xPct,
+          xSvg: xPct * 10,          // 提示框用 %，SVG 用 0–1000 用户坐标
+          emo: s.emo,
+          aff: s.aff,
+          n: s.n || 0,
+          emoY: 100 - clamp(s.emo, 0, 100),
+          time: (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hh + ':' + mm,
+          tipStyle: style
+        };
+      },
+
+      /* ---------- 测试对话 ---------- */
+      sendChat: async function () {
+        var text = (this.chat.text || '').trim();
+        if (!text || this.chat.sending) return;
+        this.chat.sending = true;
+        try {
+          if (this.source === 'live') {
+            var d = await this.post('/api/v1/chat', {
+              user_id: (this.chat.userId || '10001').trim(),
+              message: text
+            });
+            // 判重命中时后端只返回 {status:'duplicate'}，没有 debug —— 不要用空对象覆盖上一次的链路
+            if (!d || !d.debug) {
+              this.toast('warn', '判定被短路（' + ((d && d.status) || '无 debug') + '），保留上一次链路');
+              this.chat.text = '';
+              return;
+            }
+            this.pipeline = {
+              inner_os: d.inner_os || '',
+              actions: d.actions || [],
+              debug: d.debug || {},
+              recall_hint: d.recall_hint || (d.debug && d.debug.recall_hint) || null
+            };
+            this.toast('ok', '已送检并写入状态');
+            this.chat.text = '';
+            await this.refreshAll(false);
+          } else {
+            await sleep(520);
+            var demo = JSON.parse(JSON.stringify(DEMO_PIPELINE));
+            demo.debug.event_key = 'evt_' + (this.chat.userId || '10001') + '_' + Math.random().toString(16).slice(2, 8);
+            this.pipeline = demo;
+            this.chat.text = '';
+            this.toast('info', '演示模式：返回内置样例判定');
+          }
+        } catch (e) {
+          this.toast('danger', '送检失败：' + e.message);
+        } finally {
+          this.chat.sending = false;
+        }
+      }
     },
-  },
-  mounted() {
-    this.refresh();
-    this.loadConfig();
-    this.timer = setInterval(() => {
-      if (this.auto) this.refresh();
-    }, 5000);
-  },
-  beforeUnmount() {
-    if (this.timer) clearInterval(this.timer);
-  },
-}).mount('#app');
+
+    mounted: function () {
+      var self = this;
+      this.connect();
+      this.timer = setInterval(function () {
+        if (self.auto) self.refreshAll(false);
+      }, this.intervalSec * 1000);
+    },
+
+    beforeUnmount: function () {
+      if (this.timer) clearInterval(this.timer);
+    }
+  }).mount('#app');
+})();
 </script>
 </body>
 </html>

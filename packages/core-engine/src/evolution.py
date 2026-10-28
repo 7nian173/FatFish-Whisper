@@ -582,8 +582,18 @@ class EvolutionEngine:
             target += datetime.timedelta(days=1)
         return target
 
-    async def scheduler(self, stop_event: Optional[asyncio.Event] = None) -> None:
-        """夜间定时循环；用 ``stop_event.set()`` 可优雅退出。"""
+    async def scheduler(
+        self,
+        stop_event: Optional[asyncio.Event] = None,
+        on_report: Optional[Any] = None,
+    ) -> None:
+        """夜间定时循环；用 ``stop_event.set()`` 可优雅退出。
+
+        Args:
+            stop_event: 停止信号。
+            on_report: 每轮结束后的回调 ``(report) -> None``；控制台的
+                ``/admin/evolution_status`` 靠它拿到"上一次跑成什么样"。
+        """
         stop = stop_event or asyncio.Event()
         while not stop.is_set():
             now = self._clock()
@@ -598,6 +608,8 @@ class EvolutionEngine:
             try:
                 report = await self.run()
                 logger.info("演化完成：%s", report.as_dict())
+                if on_report is not None:
+                    on_report(report)
             except Exception:
                 logger.exception("演化任务异常（已忽略，等下一轮）")
 
