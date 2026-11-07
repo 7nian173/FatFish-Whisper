@@ -1,0 +1,91 @@
+[project]
+name = "sys-mcp-whisper"
+version = "0.1.0"
+description = "FatFish-Whisper 旁路情感计算中间件（六边形架构）"
+requires-python = ">=3.11"
+dependencies = [
+    # domain / engine 层唯一允许的第三方依赖。
+    # 严禁在此追加 requests / httpx / sqlite3 封装 / aiohttp 等 IO 库：
+    # packages/core/ 必须是绝对纯净的 Pydantic V2 + 纯函数。
+    "pydantic>=2.0",
+]
+
+# Web 入口层（apps/entrypoints/）专属依赖，通过 optional-dependencies 与核心纯净层物理隔离。
+# 为什么不用 dependencies：declared_deps() 对五个包返回同一份声明，把 fastapi 写进
+# dependencies 等于同时允许 packages/core/ 与 packages/legacy_bridge/ import 它——而
+# packages/core/ 是零 IO 纯函数层（见上面三行注释），legacy_bridge 也没有白名单兜底。
+# optional-dependencies 让「Web 入口要什么」与「核心层允许什么」成为两份可分别审计的声明，
+# scripts/check_imports.py 按目录（apps/ vs packages/）分流读取，结构上不可能混用。
+# 安装：uv sync --extra web  （仅跑测试/CI 时不需要）
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.162.0",
+    "uvicorn>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff==0.17.3",
+    # httpx 是 fastapi.testclient.TestClient 的运行期依赖（starlette.testclient 会
+    # StarletteDeprecationWarning 提示装 httpx2，但当前 httpx 0.28 可用）。放 dev group
+    # 是因为它只在测试里被用到，不进任何运行期允许集。
+    "httpx>=0.28",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# 本阶段只跑测试，不打包发布；声明 packages 避免 hatch 因找不到同名模块而报错。
+packages = ["packages", "apps"]
+
+[tool.pytest.ini_options]
+# rootdir 即本文件所在目录；tests/ 下有 __init__.py，pytest 会把本目录插入 sys.path，
+# 因此 `from packages.core.domain.state import ...` 可直接工作，无需额外 pythonpath。
+testpaths = ["tests"]
+addopts = "-ra"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+target-version = "py311"
+# pytest basetemp 目录不是源码：tests 用 tmp_path 造「假树」时 pytest 会
+# 递归复制出整份 apps/ + packages/，里面全是故意写坏的探针（未用 import、
+# 未排序 import）。不排除它们，每次在 30_沙盒区/ 根跑全量 ruff 都会多出
+# 几十条假告警，久而久之所有人都会学会「忽略 ruff 输出」。
+extend-exclude = ["pytest-of-zero"]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+    "RUF", # ruff 自有规则
+]
+# B017：tests 里 `pytest.raises(Exception)` 是刻意保留的宽断言（Pydantic 校验失败
+# 在不同版本间可能抛 ValidationError / TypeError / ValueError），收窄会假红。
+ignore = ["B017"]
+
+[tool.ruff.lint.per-file-ignores]
+# RUF001：COLD_NARRATION 是人类 2026-11-06 裁决的逐字文案（含全角冒号），
+# test_tier_gate.py 需用同一字面量做逐字断言（否则改文案不会有测试变红）。
+# 仅豁免 RUF001；RUF002（docstring 全角标点）不豁免，该文件的 docstring 用半角。
+"packages/core/engine/router.py" = ["RUF001"]
+"tests/engine/test_tier_gate.py" = ["RUF001"]
+# RUF001：现象学词典 ADR 的 somatic/drive/block 文案与 MOCK_LEXICON 既有台词
+# 是逐字断言对象（含全角逗号/冒号）；改写它们等于改被测对象。
+# 仅豁免 RUF001；RUF002 不豁免，本文件 docstring 用半角。
+"tests/engine/test_phenomenology.py" = ["RUF001"]
+# RUF001：assemble_messages 的 F 系断言需要逐字全角文案（封印行/标签行/冷旁白），
+# 同 test_tier_gate.py 先例；仅豁免 RUF001。
+"tests/engine/test_assemble_messages.py" = ["RUF001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["packages", "apps", "tests"]

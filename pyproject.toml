@@ -1,0 +1,30 @@
+# FatFish-Whisper V1 工作区根配置
+# 核心代码树位于 sys-mcp-whisper/ 目录下
+
+[tool.uv.workspace]
+members = ["sys-mcp-whisper"]
+
+# dev 组 = 本地与 CI 的「测试运行期全集」。
+# 为什么要在这里带 fastapi / uvicorn / httpx：
+#   - sys-mcp-whisper/tests/entrypoints/test_healthz.py:19-20 是**模块级**
+#     `import httpx` + `from fastapi.testclient import TestClient`，
+#     并且全仓没有任何 importorskip / pytest.skip 兜底；
+#   - 而 fastapi / uvicorn 在 member 里属于 optional-dependencies 的 web extra，
+#     `uv sync --locked` 默认不装 extra -> CI 收集该文件时 ModuleNotFoundError。
+#   - httpx 是 starlette TestClient 的运行期依赖，本来就在 member 的 dev 组里。
+# 放在根的 dev 组（而不是给 CI 加 --extra web）有三个好处：
+#   1) 根是虚拟工程（没有 [project] 表），`uv sync --extra web` 根本找不到名为
+#      web 的 extra，会直接报错；
+#   2) `uv run` 每次都会重新 sync，带 --extra 的安装会被下一次 uv run 当
+#      extraneous 删掉，得再配 UV_NO_SYNC，容易漏；
+#   3) 一次 sync 装齐，CI 少一轮解析。
+# 注意：改完这里必须 `uv lock` 重新生成根 uv.lock，否则 --locked 会因为
+# manifest 与 pyproject 不一致而直接失败。
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff==0.17.3",
+    "httpx>=0.28",
+    "fastapi>=0.162.0",
+    "uvicorn>=0.54.0",
+]

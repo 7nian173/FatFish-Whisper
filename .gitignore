@@ -1,0 +1,39 @@
+# --- 虚拟环境与缓存 ---
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# --- pytest 的 tmp_path 临时树（basetemp = <rootdir>/pytest-of-<user>） ---
+# 里面的 _probe.py 是测试**故意**写的违规样本（import os / requests / fastapi / sqlite3），
+# 既不能进版本库，也不能被 ruff 扫到（respect-gitignore 默认开，忽略即免除 F401）。
+pytest-of-*/
+.pycache/
+
+# 门禁用例（tests/adapters/test_gate_strict_containment.py）会在真源码树里临时写
+# 一个 _probe_import_sqlite3.py 再在 finally 里删掉。万一进程被 Ctrl-C/超时杀掉，
+# 残骸会同时踩中 check_imports 的 ports 黑名单（sqlite3）和 ruff 的 F401。
+# 这条只挡版本库，不挡门禁：门禁照旧会红，只是别把违规样本提交上去。
+sys-mcp-whisper/packages/**/_probe_import_sqlite3.py
+
+# --- 编辑器 / 系统垃圾 ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- 本地开发过程产物（严禁上传） ---
+# 脚本区/：一次性取证脚本的落点（用户 2026-11-07 定）。里面的文件是过程产物，
+# 用完即删；即便忘了删也不该进版本库，更不该被 ruff 扫到。
+脚本区/
+_ai_drafts/
+99_归档区/
+沙盘推演/
+P1P2阶段damo/
+*.db
+*.sqlite
+*.log
+*.bak

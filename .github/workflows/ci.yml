@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 根据你本地的 python 版本调整
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      # 因为现在仓库根目录就是项目根目录，直接 sync 即可
+      - name: 安装依赖
+        run: uv sync --locked
+
+      - name: 静态检查 (ruff)
+        run: uv run ruff check --output-format=github .
+
+      - name: 依赖方向与 engine 纯度
+        run: uv run python scripts/check_imports.py
+
+      - name: 组合根唯一性与旧模块隔离
+        run: uv run python scripts/check_composition.py
+
+      - name: 双仓路径隔离检查
+        run: bash scripts/check_path.sh
+
+      - name: 演示脚本可执行性 (P2.5 demo runner)
+        run: uv run python scripts/check_demo_runner.py
+
+      - name: 写回校验 (model_copy 禁令)
+        run: uv run python scripts/check_model_copy.py
+
+      # 显式传路径，让 pytest 的 rootdir 落到 sys-mcp-whisper/，从而用上 member
+      # pyproject.toml 的 testpaths=["tests"] 与 addopts="-ra"。
+      #
+      # 实测说明（2026-11-07，两处常见误判都不成立）：
+      #   1. 根目录确实没有 pytest.ini / conftest.py（V1 归档时已删），根 pyproject
+      #      也没有 [tool.pytest.ini_options]，但 pytest 仍会把根 pyproject.toml 当成
+      #      configfile，所以不传路径**不会**崩溃，也不会少收测试。
+      #   2. 不传路径也**不会**扫到 pytest-of-zero/：那里没有 test_*.py（只有
+      #      _probe.py 等非测试前缀文件），本次实测两种写法收集数都是 853。
+      # 所以这个路径是加固（锁定 rootdir 与 member 配置），不是救火。
+      - name: 测试
+        run: uv run python -m pytest -q sys-mcp-whisper/tests
